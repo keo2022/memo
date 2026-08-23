@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(npm *)",
+      "PowerShell(curl.exe -s -o NUL -w \"STATUS:%{http_code} SIZE:%{size_download}`n\" \"http://localhost:8090/index.ts.bundle?platform=android&dev=true\")",
+      "PowerShell(curl.exe -s \"http://localhost:8090/\" -H \"Accept: application/expo+json\" -H \"Expo-Platform: android\")",
+      "PowerShell(Get-Process *)"
+    ]
+  }
+}
