@@ -1,9 +1,10 @@
 import React from 'react';
-import { NavigationContainer } from '@react-navigation/native';
+import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import MenuListScreen from '../screens/MenuListScreen';
 import SheetListScreen from '../screens/SheetListScreen';
 import SheetDetailScreen from '../screens/SheetDetailScreen';
+import { colors } from '../theme';
 
 export type RootStackParamList = {
   MenuList: undefined;
@@ -13,10 +14,31 @@ export type RootStackParamList = {
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
+const navigationTheme = {
+  ...DefaultTheme,
+  colors: {
+    ...DefaultTheme.colors,
+    primary: colors.primary,
+    background: colors.background,
+    card: colors.surface,
+    text: colors.textPrimary,
+    border: colors.border,
+  },
+};
+
 export default function RootNavigator() {
   return (
-    <NavigationContainer>
-      <Stack.Navigator initialRouteName="MenuList">
+    <NavigationContainer theme={navigationTheme}>
+      <Stack.Navigator
+        initialRouteName="MenuList"
+        screenOptions={{
+          headerShadowVisible: false,
+          headerStyle: { backgroundColor: colors.surface },
+          headerTitleStyle: { fontWeight: '700', color: colors.textPrimary },
+          headerTintColor: colors.primary,
+          contentStyle: { backgroundColor: colors.background },
+        }}
+      >
         <Stack.Screen name="MenuList" component={MenuListScreen} options={{ title: '메뉴' }} />
         <Stack.Screen
           name="SheetList"
