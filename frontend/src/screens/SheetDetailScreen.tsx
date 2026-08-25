@@ -467,7 +467,6 @@ export default function SheetDetailScreen({ route, navigation }: Props) {
               style={styles.modalInput}
               value={draft}
               onChangeText={setDraft}
-              placeholder="값 또는 =SUM(A1:A3) 같은 수식"
               placeholderTextColor={colors.textMuted}
               autoFocus
             />

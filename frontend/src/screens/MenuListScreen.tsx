@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from 'react';
-import { View, Text, FlatList, TouchableOpacity, TextInput, StyleSheet, Alert } from 'react-native';
+import { View, Text, FlatList, TouchableOpacity, StyleSheet, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -8,14 +8,15 @@ import { api } from '../db/repository';
 import type { Menu } from '../types';
 import { colors, radius, spacing, shadow } from '../theme';
 import ItemActionModal from '../components/ItemActionModal';
+import NamePromptModal from '../components/NamePromptModal';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'MenuList'>;
 
 export default function MenuListScreen({ navigation }: Props) {
   const [menus, setMenus] = useState<Menu[]>([]);
-  const [newMenuName, setNewMenuName] = useState('');
   const [loading, setLoading] = useState(false);
   const [actionTarget, setActionTarget] = useState<Menu | null>(null);
+  const [addModalVisible, setAddModalVisible] = useState(false);
 
   const loadMenus = useCallback(async () => {
     try {
@@ -34,11 +35,9 @@ export default function MenuListScreen({ navigation }: Props) {
     }, [loadMenus])
   );
 
-  const handleAddMenu = async () => {
-    if (!newMenuName.trim()) return;
+  const handleAddMenu = async (name: string) => {
     try {
-      await api.createMenu(newMenuName.trim());
-      setNewMenuName('');
+      await api.createMenu(name);
       loadMenus();
     } catch (e) {
       Alert.alert('메뉴 생성 실패', String(e));
@@ -47,28 +46,6 @@ export default function MenuListScreen({ navigation }: Props) {
 
   return (
     <View style={styles.container}>
-      <View style={styles.addRow}>
-        <View style={styles.inputWrapper}>
-          <Ionicons name="folder-outline" size={18} color={colors.textMuted} style={styles.inputIcon} />
-          <TextInput
-            style={styles.input}
-            placeholder="새 메뉴 이름 (예: 가계부, 운동일지)"
-            placeholderTextColor={colors.textMuted}
-            value={newMenuName}
-            onChangeText={setNewMenuName}
-            onSubmitEditing={handleAddMenu}
-            returnKeyType="done"
-          />
-        </View>
-        <TouchableOpacity
-          style={[styles.addButton, !newMenuName.trim() && styles.addButtonDisabled]}
-          onPress={handleAddMenu}
-          disabled={!newMenuName.trim()}
-        >
-          <Ionicons name="add" size={24} color={colors.white} />
-        </TouchableOpacity>
-      </View>
-
       <FlatList
         data={menus}
         keyExtractor={(item) => item.id}
@@ -78,7 +55,7 @@ export default function MenuListScreen({ navigation }: Props) {
         ListEmptyComponent={
           <View style={styles.empty}>
             <Ionicons name="file-tray-outline" size={40} color={colors.textMuted} />
-            <Text style={styles.emptyText}>메뉴가 없습니다{'\n'}위에서 새 메뉴를 추가해보세요</Text>
+            <Text style={styles.emptyText}>메뉴가 없습니다{'\n'}아래 + 버튼으로 새 메뉴를 추가해보세요</Text>
           </View>
         }
         renderItem={({ item }) => (
@@ -97,6 +74,18 @@ export default function MenuListScreen({ navigation }: Props) {
             <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
           </TouchableOpacity>
         )}
+      />
+
+      <TouchableOpacity style={styles.fab} activeOpacity={0.85} onPress={() => setAddModalVisible(true)}>
+        <Ionicons name="add" size={28} color={colors.white} />
+      </TouchableOpacity>
+
+      <NamePromptModal
+        visible={addModalVisible}
+        title="새 메뉴 추가"
+        placeholder="메뉴 이름"
+        onClose={() => setAddModalVisible(false)}
+        onConfirm={handleAddMenu}
       />
 
       <ItemActionModal
@@ -130,32 +119,19 @@ export default function MenuListScreen({ navigation }: Props) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background, padding: spacing.lg },
-  addRow: { flexDirection: 'row', marginBottom: spacing.lg, alignItems: 'center' },
-  inputWrapper: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.surface,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    paddingHorizontal: spacing.md,
-    marginRight: spacing.sm,
-    ...shadow.card,
-  },
-  inputIcon: { marginRight: spacing.sm },
-  input: { flex: 1, paddingVertical: 12, fontSize: 15, color: colors.textPrimary },
-  addButton: {
-    width: 44,
-    height: 44,
-    borderRadius: radius.md,
+  fab: {
+    position: 'absolute',
+    right: spacing.lg,
+    bottom: spacing.lg,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
     backgroundColor: colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
-    ...shadow.card,
+    ...shadow.floating,
   },
-  addButtonDisabled: { backgroundColor: colors.textMuted, shadowOpacity: 0 },
-  listContent: { paddingBottom: spacing.xl },
+  listContent: { paddingBottom: spacing.xl * 2 },
   emptyContainer: { flexGrow: 1 },
   menuItem: {
     flexDirection: 'row',
