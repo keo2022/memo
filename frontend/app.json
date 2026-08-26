@@ -1,21 +1,31 @@
 {
   "expo": {
-    "name": "excel-memo-app",
-    "slug": "excel-memo-app",
+    "name": "WEDDINGLOG",
+    "slug": "memo",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "icon": "./assets/icon.png",
     "ios": {
       "supportsTablet": true
     },
     "android": {
-      "package": "com.excelmemoapp.app",
+      "package": "com.memo.app",
       "versionCode": 1
     },
     "web": {
       "bundler": "metro"
-    }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "be55a39e-e88c-43a5-8a55-1bf041cf30ef"
+      }
+    },
+    "plugins": [
+      "expo-font"
+    ]
   }
 }
