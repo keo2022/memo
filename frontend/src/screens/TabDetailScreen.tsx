@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useLayoutEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -15,10 +15,11 @@ import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/RootNavigator';
 import { api } from '../db/repository';
-import type { CellInfo, ColumnFormat, Merge, Sheet, SheetDetail } from '../types';
+import type { CellInfo, ColumnFormat, Merge, Tab, TabDetail } from '../types';
 import { colors, radius, spacing, shadow } from '../theme';
+import NamePromptModal from '../components/NamePromptModal';
 
-type Props = NativeStackScreenProps<RootStackParamList, 'SheetDetail'>;
+type Props = NativeStackScreenProps<RootStackParamList, 'TabDetail'>;
 
 const CELL_WIDTH = 96;
 const ROW_HEADER_WIDTH = 44;
@@ -82,10 +83,12 @@ function buildMergePlan(merges: Merge[], rows: number, cols: number): CellPlan[]
   return plan;
 }
 
-export default function SheetDetailScreen({ route, navigation }: Props) {
-  const { sheetId } = route.params;
-  const [sheet, setSheet] = useState<SheetDetail | null>(null);
-  const [siblings, setSiblings] = useState<Sheet[]>([]);
+export default function TabDetailScreen({ route, navigation }: Props) {
+  const { sheetId, sheetName, tabId } = route.params;
+  const [tab, setTab] = useState<TabDetail | null>(null);
+  const [siblings, setSiblings] = useState<Tab[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [addTabModalVisible, setAddTabModalVisible] = useState(false);
   const [selected, setSelected] = useState<CellInfo | null>(null);
   const [draft, setDraft] = useState('');
   const [resizing, setResizing] = useState(false);
@@ -95,44 +98,85 @@ export default function SheetDetailScreen({ route, navigation }: Props) {
     null
   );
 
-  const loadSheet = useCallback(async () => {
+  const loadTab = useCallback(async () => {
     try {
-      const detail = await api.getSheet(sheetId);
-      setSheet(detail);
-      setSiblings(await api.getSheets(detail.menuId));
-    } catch (e) {
-      Alert.alert('시트를 불러오지 못했습니다', String(e));
-    }
-  }, [sheetId]);
+      const tabsList = await api.getTabs(sheetId);
+      setSiblings(tabsList);
 
-  const switchSheet = (target: Sheet) => {
-    if (target.id === sheetId) return;
-    navigation.setParams({ sheetId: target.id, sheetName: target.name });
+      // tabId가 안 넘어왔으면(시트에 처음 들어온 경우) 첫번째 탭을 자동으로 보여줍니다.
+      const targetId = tabId ?? tabsList[0]?.id;
+      if (!targetId) {
+        setTab(null);
+        return;
+      }
+
+      const detail = await api.getTab(targetId);
+      setTab(detail);
+      if (tabId !== targetId) {
+        navigation.setParams({ tabId: detail.id, tabName: detail.name });
+      }
+    } catch (e) {
+      Alert.alert('탭을 불러오지 못했습니다', String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [sheetId, tabId, navigation]);
+
+  const switchTab = (target: Tab) => {
+    if (target.id === tab?.id) return;
+    navigation.setParams({ tabId: target.id, tabName: target.name });
+  };
+
+  const handleAddTab = async (name: string) => {
+    try {
+      const newTab = await api.createTab(sheetId, name);
+      setAddTabModalVisible(false);
+      navigation.setParams({ tabId: newTab.id, tabName: newTab.name });
+      setSiblings(await api.getTabs(sheetId));
+      setTab(await api.getTab(newTab.id));
+    } catch (e) {
+      Alert.alert('탭 생성 실패', String(e));
+    }
   };
 
   useFocusEffect(
     useCallback(() => {
-      loadSheet();
-    }, [loadSheet])
+      loadTab();
+    }, [loadTab])
   );
+
+  useLayoutEffect(() => {
+    navigation.setOptions({
+      headerRight: () => (
+        <View style={styles.headerButtons}>
+          <TouchableOpacity onPress={() => navigation.navigate('TabList', { sheetId, sheetName })} hitSlop={8}>
+            <Ionicons name="list-outline" size={24} color={colors.primary} />
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => setAddTabModalVisible(true)} hitSlop={8}>
+            <Ionicons name="add" size={26} color={colors.primary} />
+          </TouchableOpacity>
+        </View>
+      ),
+    });
+  }, [navigation, sheetId, sheetName]);
 
   const cellMap = useMemo(() => {
     const map = new Map<string, CellInfo>();
-    sheet?.cells.forEach((c) => map.set(`${c.row}_${c.col}`, c));
+    tab?.cells.forEach((c) => map.set(`${c.row}_${c.col}`, c));
     return map;
-  }, [sheet]);
+  }, [tab]);
 
   const mergePlan = useMemo(
-    () => buildMergePlan(sheet?.merges ?? [], sheet?.rows ?? 0, sheet?.cols ?? 0),
-    [sheet]
+    () => buildMergePlan(tab?.merges ?? [], tab?.rows ?? 0, tab?.cols ?? 0),
+    [tab]
   );
 
   // 열 너비: 수동으로 지정해둔 값이 있으면 그걸 쓰고, 없으면 그 열에서 가장 긴 값 기준으로 자동 계산합니다.
   const colWidths = useMemo(() => {
-    if (!sheet) return [];
-    const maxLen = Array.from({ length: sheet.cols }, (_, c) => colLabel(c).length);
-    sheet.cells.forEach((cell) => {
-      const format = sheet.columnFormats[cell.col] ?? 'text';
+    if (!tab) return [];
+    const maxLen = Array.from({ length: tab.cols }, (_, c) => colLabel(c).length);
+    tab.cells.forEach((cell) => {
+      const format = tab.columnFormats[cell.col] ?? 'text';
       if (format === 'checkbox') return;
       const display = cell.formula
         ? format === 'number'
@@ -143,14 +187,14 @@ export default function SheetDetailScreen({ route, navigation }: Props) {
           : cell.value;
       maxLen[cell.col] = Math.max(maxLen[cell.col], display.length);
     });
-    return Array.from({ length: sheet.cols }, (_, col) => {
-      const override = sheet.columnWidths[col];
+    return Array.from({ length: tab.cols }, (_, col) => {
+      const override = tab.columnWidths[col];
       if (override != null) return override;
-      if ((sheet.columnFormats[col] ?? 'text') === 'checkbox') return CHECKBOX_COL_WIDTH;
+      if ((tab.columnFormats[col] ?? 'text') === 'checkbox') return CHECKBOX_COL_WIDTH;
       const estimated = maxLen[col] * CHAR_WIDTH_ESTIMATE + CELL_HORIZONTAL_PADDING;
       return Math.min(MAX_COL_WIDTH, Math.max(DEFAULT_COL_WIDTH, estimated));
     });
-  }, [sheet]);
+  }, [tab]);
 
   // colOffsets[i] = 0..i-1번 열 너비의 합 (i번 열이 시작하는 x좌표). 마지막 원소는 전체 너비.
   const colOffsets = useMemo(() => {
@@ -159,21 +203,47 @@ export default function SheetDetailScreen({ route, navigation }: Props) {
     return offsets;
   }, [colWidths]);
 
+  if (loading) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator color={colors.primary} size="large" />
+        <Text style={styles.loadingText}>불러오는 중...</Text>
+      </View>
+    );
+  }
+
+  if (!tab) {
+    return (
+      <View style={styles.center}>
+        <Ionicons name="grid-outline" size={40} color={colors.textMuted} />
+        <Text style={styles.emptyText}>탭이 없습니다{'\n'}오른쪽 위 + 버튼으로 새 탭을 추가해보세요</Text>
+        <NamePromptModal
+          visible={addTabModalVisible}
+          title="새 탭 추가"
+          placeholder="탭 이름"
+          onClose={() => setAddTabModalVisible(false)}
+          onConfirm={handleAddTab}
+        />
+      </View>
+    );
+  }
+
   const openCell = (row: number, col: number) => {
     const cell = cellMap.get(`${row}_${col}`);
     const info: CellInfo = cell ?? { row, col, value: '', computed: 0 };
-
-    if (sheet?.columnFormats[col] === 'checkbox') {
-      const next = info.value === 'O' ? 'X' : info.value === 'X' ? '' : 'O';
-      api
-        .updateCell(sheetId, row, col, next)
-        .then(() => loadSheet())
-        .catch((e) => Alert.alert('저장 실패', String(e)));
-      return;
-    }
-
     setSelected(info);
     setDraft(info.formula ? info.formula : info.value);
+  };
+
+  const saveCheckbox = async (value: string) => {
+    if (!selected) return;
+    try {
+      await api.updateCell(tab.id, selected.row, selected.col, value);
+      setSelected(null);
+      loadTab();
+    } catch (e) {
+      Alert.alert('저장 실패', String(e));
+    }
   };
 
   const applyUnit = (multiplier: number) => {
@@ -185,8 +255,8 @@ export default function SheetDetailScreen({ route, navigation }: Props) {
   const changeColumnFormat = async (format: ColumnFormat) => {
     if (formatPickerCol === null) return;
     try {
-      await api.setColumnFormat(sheetId, formatPickerCol, format);
-      loadSheet();
+      await api.setColumnFormat(tab.id, formatPickerCol, format);
+      loadTab();
     } catch (e) {
       Alert.alert('열 포맷 변경 실패', String(e));
     }
@@ -197,8 +267,8 @@ export default function SheetDetailScreen({ route, navigation }: Props) {
     const current = colWidths[formatPickerCol] ?? MIN_COL_WIDTH;
     const next = Math.min(MAX_COL_WIDTH, Math.max(MIN_COL_WIDTH, Math.round(current + delta)));
     try {
-      await api.setColumnWidth(sheetId, formatPickerCol, next);
-      loadSheet();
+      await api.setColumnWidth(tab.id, formatPickerCol, next);
+      loadTab();
     } catch (e) {
       Alert.alert('열 너비 변경 실패', String(e));
     }
@@ -207,8 +277,8 @@ export default function SheetDetailScreen({ route, navigation }: Props) {
   const resetColumnWidthAuto = async () => {
     if (formatPickerCol === null) return;
     try {
-      await api.setColumnWidth(sheetId, formatPickerCol, null);
-      loadSheet();
+      await api.setColumnWidth(tab.id, formatPickerCol, null);
+      loadTab();
     } catch (e) {
       Alert.alert('열 너비 초기화 실패', String(e));
     }
@@ -217,30 +287,30 @@ export default function SheetDetailScreen({ route, navigation }: Props) {
   const resetColumnWidthDefault = async () => {
     if (formatPickerCol === null) return;
     try {
-      await api.setColumnWidth(sheetId, formatPickerCol, DEFAULT_COL_WIDTH);
-      loadSheet();
+      await api.setColumnWidth(tab.id, formatPickerCol, DEFAULT_COL_WIDTH);
+      loadTab();
     } catch (e) {
       Alert.alert('열 너비 초기화 실패', String(e));
     }
   };
 
   const openMergeModal = (row: number, col: number) => {
-    const existing = sheet?.merges.find((m) => m.anchorRow === row && m.anchorCol === col);
+    const existing = tab.merges.find((m) => m.anchorRow === row && m.anchorCol === col);
     setMergeTarget({ row, col, rowSpan: existing?.rowSpan ?? 1, colSpan: existing?.colSpan ?? 1 });
   };
 
   const adjustMergeSpan = (axis: 'rowSpan' | 'colSpan', delta: number) => {
-    if (!mergeTarget || !sheet) return;
-    const max = axis === 'rowSpan' ? sheet.rows - mergeTarget.row : sheet.cols - mergeTarget.col;
+    if (!mergeTarget) return;
+    const max = axis === 'rowSpan' ? tab.rows - mergeTarget.row : tab.cols - mergeTarget.col;
     setMergeTarget({ ...mergeTarget, [axis]: Math.min(max, Math.max(1, mergeTarget[axis] + delta)) });
   };
 
   const applyMerge = async () => {
     if (!mergeTarget) return;
     try {
-      await api.setMerge(sheetId, mergeTarget.row, mergeTarget.col, mergeTarget.rowSpan, mergeTarget.colSpan);
+      await api.setMerge(tab.id, mergeTarget.row, mergeTarget.col, mergeTarget.rowSpan, mergeTarget.colSpan);
       setMergeTarget(null);
-      loadSheet();
+      loadTab();
     } catch (e) {
       Alert.alert('병합 실패', String(e));
     }
@@ -249,9 +319,9 @@ export default function SheetDetailScreen({ route, navigation }: Props) {
   const unmerge = async () => {
     if (!mergeTarget) return;
     try {
-      await api.setMerge(sheetId, mergeTarget.row, mergeTarget.col, 1, 1);
+      await api.setMerge(tab.id, mergeTarget.row, mergeTarget.col, 1, 1);
       setMergeTarget(null);
-      loadSheet();
+      loadTab();
     } catch (e) {
       Alert.alert('병합 해제 실패', String(e));
     }
@@ -261,8 +331,8 @@ export default function SheetDetailScreen({ route, navigation }: Props) {
     if (resizing) return;
     setResizing(true);
     try {
-      await api.insertRow(sheetId, index);
-      await loadSheet();
+      await api.insertRow(tab.id, index);
+      await loadTab();
     } catch (e) {
       Alert.alert('행 추가 실패', String(e));
     } finally {
@@ -274,8 +344,8 @@ export default function SheetDetailScreen({ route, navigation }: Props) {
     if (resizing) return;
     setResizing(true);
     try {
-      await api.insertColumn(sheetId, index);
-      await loadSheet();
+      await api.insertColumn(tab.id, index);
+      await loadTab();
     } catch (e) {
       Alert.alert('열 추가 실패', String(e));
     } finally {
@@ -300,34 +370,25 @@ export default function SheetDetailScreen({ route, navigation }: Props) {
     const isFormula = draft.trim().startsWith('=');
     try {
       await api.updateCell(
-        sheetId,
+        tab.id,
         selected.row,
         selected.col,
         isFormula ? '' : draft,
         isFormula ? draft.trim() : undefined
       );
       setSelected(null);
-      loadSheet();
+      loadTab();
     } catch (e) {
       Alert.alert('저장 실패', String(e));
     }
   };
-
-  if (!sheet) {
-    return (
-      <View style={styles.center}>
-        <ActivityIndicator color={colors.primary} size="large" />
-        <Text style={styles.loadingText}>불러오는 중...</Text>
-      </View>
-    );
-  }
 
   const renderDataCell = (row: number, col: number) => {
     const plan = mergePlan[row][col];
     if (plan.kind === 'skip') return null;
 
     const cell = cellMap.get(`${row}_${col}`);
-    const format = sheet.columnFormats[col] ?? 'text';
+    const format = tab.columnFormats[col] ?? 'text';
     const isFormula = !!cell?.formula;
     const rawValue = cell?.value ?? '';
     const positionStyle = {
@@ -385,12 +446,12 @@ export default function SheetDetailScreen({ route, navigation }: Props) {
           contentContainerStyle={styles.tabBarContent}
         >
           {siblings.map((s) => {
-            const active = s.id === sheetId;
+            const active = s.id === tab.id;
             return (
               <TouchableOpacity
                 key={s.id}
                 style={[styles.tabPill, active && styles.tabPillActive]}
-                onPress={() => switchSheet(s)}
+                onPress={() => switchTab(s)}
               >
                 <Text style={[styles.tabPillText, active && styles.tabPillTextActive]} numberOfLines={1}>
                   {s.name}
@@ -405,8 +466,8 @@ export default function SheetDetailScreen({ route, navigation }: Props) {
           <View>
             <View style={styles.row}>
               <View style={[styles.cell, styles.headerCell, styles.rowHeaderCell]} />
-              {Array.from({ length: sheet.cols }).map((_, col) => {
-                const format = sheet.columnFormats[col] ?? 'text';
+              {Array.from({ length: tab.cols }).map((_, col) => {
+                const format = tab.columnFormats[col] ?? 'text';
                 const formatMeta = FORMAT_OPTIONS.find((f) => f.format === format);
                 return (
                   <TouchableOpacity
@@ -427,7 +488,7 @@ export default function SheetDetailScreen({ route, navigation }: Props) {
             <ScrollView showsVerticalScrollIndicator={false}>
               <View style={{ flexDirection: 'row' }}>
                 <View>
-                  {Array.from({ length: sheet.rows }).map((_, row) => (
+                  {Array.from({ length: tab.rows }).map((_, row) => (
                     <TouchableOpacity
                       key={row}
                       style={[styles.cell, styles.headerCell, styles.rowHeaderCell]}
@@ -438,9 +499,9 @@ export default function SheetDetailScreen({ route, navigation }: Props) {
                     </TouchableOpacity>
                   ))}
                 </View>
-                <View style={{ width: colOffsets[sheet.cols], height: sheet.rows * CELL_HEIGHT }}>
-                  {Array.from({ length: sheet.rows }).flatMap((_, row) =>
-                    Array.from({ length: sheet.cols }).map((_, col) => renderDataCell(row, col))
+                <View style={{ width: colOffsets[tab.cols], height: tab.rows * CELL_HEIGHT }}>
+                  {Array.from({ length: tab.rows }).flatMap((_, row) =>
+                    Array.from({ length: tab.cols }).map((_, col) => renderDataCell(row, col))
                   )}
                 </View>
               </View>
@@ -463,34 +524,96 @@ export default function SheetDetailScreen({ route, navigation }: Props) {
               </TouchableOpacity>
             </View>
 
-            <TextInput
-              style={styles.modalInput}
-              value={draft}
-              onChangeText={setDraft}
-              placeholderTextColor={colors.textMuted}
-              autoFocus
-            />
-
-            {selected && sheet.columnFormats[selected.col] === 'number' && !draft.trim().startsWith('=') && (
-              <View style={styles.unitRow}>
-                {NUMBER_UNITS.map((u) => (
-                  <TouchableOpacity key={u.label} style={styles.unitButton} onPress={() => applyUnit(u.multiplier)}>
-                    <Text style={styles.unitButtonText}>×{u.label}</Text>
+            {selected && tab.columnFormats[selected.col] === 'checkbox' ? (
+              <>
+                <View style={styles.checkboxChoiceRow}>
+                  <TouchableOpacity
+                    style={[styles.checkboxChoiceButton, selected.value === 'O' && styles.checkboxChoiceButtonActive]}
+                    onPress={() => saveCheckbox('O')}
+                  >
+                    <Ionicons
+                      name="checkmark-circle"
+                      size={26}
+                      color={selected.value === 'O' ? colors.white : colors.primary}
+                    />
+                    <Text
+                      style={[styles.checkboxChoiceLabel, selected.value === 'O' && styles.checkboxChoiceLabelActive]}
+                    >
+                      O
+                    </Text>
                   </TouchableOpacity>
-                ))}
-              </View>
+                  <TouchableOpacity
+                    style={[styles.checkboxChoiceButton, selected.value === 'X' && styles.checkboxChoiceButtonActiveDanger]}
+                    onPress={() => saveCheckbox('X')}
+                  >
+                    <Ionicons
+                      name="close-circle"
+                      size={26}
+                      color={selected.value === 'X' ? colors.white : colors.danger}
+                    />
+                    <Text
+                      style={[styles.checkboxChoiceLabel, selected.value === 'X' && styles.checkboxChoiceLabelActive]}
+                    >
+                      X
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.checkboxChoiceButton, selected.value === '' && styles.checkboxChoiceButtonActiveMuted]}
+                    onPress={() => saveCheckbox('')}
+                  >
+                    <Ionicons
+                      name="ellipse-outline"
+                      size={26}
+                      color={selected.value === '' ? colors.white : colors.textMuted}
+                    />
+                    <Text
+                      style={[styles.checkboxChoiceLabel, selected.value === '' && styles.checkboxChoiceLabelActive]}
+                    >
+                      해제
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                <View style={styles.modalActions}>
+                  <TouchableOpacity onPress={() => setSelected(null)} style={[styles.modalButton, styles.modalCancel]}>
+                    <Text style={styles.modalCancelText}>취소</Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            ) : (
+              <>
+                <TextInput
+                  style={styles.modalInput}
+                  value={draft}
+                  onChangeText={setDraft}
+                  placeholderTextColor={colors.textMuted}
+                  autoFocus
+                  multiline
+                  textAlignVertical="top"
+                />
+
+                {selected && tab.columnFormats[selected.col] === 'number' && !draft.trim().startsWith('=') && (
+                  <View style={styles.unitRow}>
+                    {NUMBER_UNITS.map((u) => (
+                      <TouchableOpacity key={u.label} style={styles.unitButton} onPress={() => applyUnit(u.multiplier)}>
+                        <Text style={styles.unitButtonText}>×{u.label}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )}
+
+                <Text style={styles.modalHint}>지원 함수: SUM · AVERAGE · MAX · MIN</Text>
+
+                <View style={styles.modalActions}>
+                  <TouchableOpacity onPress={() => setSelected(null)} style={[styles.modalButton, styles.modalCancel]}>
+                    <Text style={styles.modalCancelText}>취소</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={saveCell} style={[styles.modalButton, styles.modalPrimary]}>
+                    <Text style={styles.modalPrimaryText}>저장</Text>
+                  </TouchableOpacity>
+                </View>
+              </>
             )}
-
-            <Text style={styles.modalHint}>지원 함수: SUM · AVERAGE · MAX · MIN</Text>
-
-            <View style={styles.modalActions}>
-              <TouchableOpacity onPress={() => setSelected(null)} style={[styles.modalButton, styles.modalCancel]}>
-                <Text style={styles.modalCancelText}>취소</Text>
-              </TouchableOpacity>
-              <TouchableOpacity onPress={saveCell} style={[styles.modalButton, styles.modalPrimary]}>
-                <Text style={styles.modalPrimaryText}>저장</Text>
-              </TouchableOpacity>
-            </View>
           </View>
         </View>
       </Modal>
@@ -513,7 +636,7 @@ export default function SheetDetailScreen({ route, navigation }: Props) {
             </View>
 
             {FORMAT_OPTIONS.map((opt) => {
-              const active = formatPickerCol !== null && (sheet.columnFormats[formatPickerCol] ?? 'text') === opt.format;
+              const active = formatPickerCol !== null && (tab.columnFormats[formatPickerCol] ?? 'text') === opt.format;
               return (
                 <TouchableOpacity
                   key={opt.format}
@@ -667,6 +790,14 @@ export default function SheetDetailScreen({ route, navigation }: Props) {
           </View>
         </View>
       </Modal>
+
+      <NamePromptModal
+        visible={addTabModalVisible}
+        title="새 탭 추가"
+        placeholder="탭 이름"
+        onClose={() => setAddTabModalVisible(false)}
+        onConfirm={handleAddTab}
+      />
     </View>
   );
 }
@@ -675,6 +806,8 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: spacing.md },
   loadingText: { color: colors.textMuted, fontSize: 14 },
+  emptyText: { textAlign: 'center', color: colors.textMuted, fontSize: 14, lineHeight: 20 },
+  headerButtons: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginRight: spacing.xs },
   tabBar: { flexGrow: 0, backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.border },
   tabBarContent: { paddingHorizontal: spacing.md, paddingVertical: spacing.sm, gap: spacing.sm },
   tabPill: {
@@ -737,6 +870,8 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: colors.textPrimary,
     backgroundColor: colors.background,
+    minHeight: 44,
+    maxHeight: 160,
   },
   modalHint: { color: colors.textMuted, fontSize: 12, marginTop: spacing.sm, marginBottom: spacing.md },
   modalActions: { flexDirection: 'row', justifyContent: 'flex-end' },
@@ -756,6 +891,22 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   unitButtonText: { color: colors.primaryDark, fontWeight: '700', fontSize: 13 },
+  checkboxChoiceRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm },
+  checkboxChoiceButton: {
+    flex: 1,
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: spacing.md,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.background,
+  },
+  checkboxChoiceButtonActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  checkboxChoiceButtonActiveDanger: { backgroundColor: colors.danger, borderColor: colors.danger },
+  checkboxChoiceButtonActiveMuted: { backgroundColor: colors.textMuted, borderColor: colors.textMuted },
+  checkboxChoiceLabel: { fontSize: 13, fontWeight: '700', color: colors.textSecondary },
+  checkboxChoiceLabelActive: { color: colors.white },
   formatPickerTitle: { fontSize: 16, fontWeight: '700', color: colors.textPrimary },
   formatOption: {
     flexDirection: 'row',

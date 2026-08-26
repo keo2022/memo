@@ -1,12 +1,12 @@
-export interface Menu {
+export interface Sheet {
   id: string;
   name: string;
   order: number;
 }
 
-export interface Sheet {
+export interface Tab {
   id: string;
-  menuId: string;
+  sheetId: string;
   name: string;
   rows: number;
   cols: number;
@@ -29,7 +29,7 @@ export interface Merge {
   colSpan: number;
 }
 
-export interface SheetDetail extends Sheet {
+export interface TabDetail extends Tab {
   cells: CellInfo[];
   columnFormats: ColumnFormat[];
   columnWidths: (number | null)[];

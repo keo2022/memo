@@ -31,7 +31,7 @@ function cellRefToString(row: number, col: number): string {
 }
 
 /**
- * 시트에 행/열이 중간에 삽입될 때, 수식 안의 셀 참조(A1, A1:A3 등)가 계속 같은 칸을
+ * 탭에 행/열이 중간에 삽입될 때, 수식 안의 셀 참조(A1, A1:A3 등)가 계속 같은 칸을
  * 가리키도록 좌표를 밀어줍니다. (Excel이 행/열 삽입 시 수식을 자동으로 조정하는 것과 동일한 개념)
  */
 export function shiftFormulaRefs(formula: string, axis: 'row' | 'col', insertIndex: number): string {

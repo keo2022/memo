@@ -12,8 +12,7 @@ import NamePromptModal from '../components/NamePromptModal';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'SheetList'>;
 
-export default function SheetListScreen({ route, navigation }: Props) {
-  const { menuId } = route.params;
+export default function SheetListScreen({ navigation }: Props) {
   const [sheets, setSheets] = useState<Sheet[]>([]);
   const [loading, setLoading] = useState(false);
   const [actionTarget, setActionTarget] = useState<Sheet | null>(null);
@@ -22,13 +21,13 @@ export default function SheetListScreen({ route, navigation }: Props) {
   const loadSheets = useCallback(async () => {
     try {
       setLoading(true);
-      setSheets(await api.getSheets(menuId));
+      setSheets(await api.getSheets());
     } catch (e) {
       Alert.alert('시트를 불러오지 못했습니다', String(e));
     } finally {
       setLoading(false);
     }
-  }, [menuId]);
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
@@ -38,7 +37,7 @@ export default function SheetListScreen({ route, navigation }: Props) {
 
   const handleAddSheet = async (name: string) => {
     try {
-      await api.createSheet(menuId, name);
+      await api.createSheet(name);
       loadSheets();
     } catch (e) {
       Alert.alert('시트 생성 실패', String(e));
@@ -55,7 +54,7 @@ export default function SheetListScreen({ route, navigation }: Props) {
         contentContainerStyle={sheets.length === 0 ? styles.emptyContainer : styles.listContent}
         ListEmptyComponent={
           <View style={styles.empty}>
-            <Ionicons name="grid-outline" size={40} color={colors.textMuted} />
+            <Ionicons name="file-tray-outline" size={40} color={colors.textMuted} />
             <Text style={styles.emptyText}>시트가 없습니다{'\n'}아래 + 버튼으로 새 시트를 추가해보세요</Text>
           </View>
         }
@@ -63,20 +62,15 @@ export default function SheetListScreen({ route, navigation }: Props) {
           <TouchableOpacity
             style={styles.sheetItem}
             activeOpacity={0.7}
-            onPress={() => navigation.navigate('SheetDetail', { sheetId: item.id, sheetName: item.name })}
+            onPress={() => navigation.navigate('TabDetail', { sheetId: item.id, sheetName: item.name })}
             onLongPress={() => setActionTarget(item)}
           >
             <View style={styles.sheetIconWrap}>
-              <Ionicons name="grid" size={20} color={colors.primary} />
+              <Ionicons name="folder" size={20} color={colors.primary} />
             </View>
-            <View style={styles.sheetTextWrap}>
-              <Text style={styles.sheetItemText} numberOfLines={1}>
-                {item.name}
-              </Text>
-              <Text style={styles.sheetSubText}>
-                {item.rows}행 × {item.cols}열
-              </Text>
-            </View>
+            <Text style={styles.sheetItemText} numberOfLines={1}>
+              {item.name}
+            </Text>
             <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
           </TouchableOpacity>
         )}
@@ -98,7 +92,7 @@ export default function SheetListScreen({ route, navigation }: Props) {
         visible={!!actionTarget}
         itemName={actionTarget?.name ?? ''}
         itemTypeLabel="시트"
-        deleteWarning={`"${actionTarget?.name ?? ''}" 시트의 모든 데이터가 완전히 삭제됩니다. 이 작업은 되돌릴 수 없어요.`}
+        deleteWarning={`"${actionTarget?.name ?? ''}" 시트와 그 안의 모든 탭·데이터가 완전히 삭제됩니다. 이 작업은 되돌릴 수 없어요.`}
         onClose={() => setActionTarget(null)}
         onRename={async (name) => {
           if (!actionTarget) return;
@@ -157,9 +151,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginRight: spacing.md,
   },
-  sheetTextWrap: { flex: 1 },
-  sheetItemText: { fontSize: 16, fontWeight: '600', color: colors.textPrimary },
-  sheetSubText: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+  sheetItemText: { flex: 1, fontSize: 16, fontWeight: '600', color: colors.textPrimary },
   empty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: spacing.md },
   emptyText: { textAlign: 'center', color: colors.textMuted, fontSize: 14, lineHeight: 20 },
 });

@@ -1,15 +1,15 @@
 import React from 'react';
 import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import MenuListScreen from '../screens/MenuListScreen';
 import SheetListScreen from '../screens/SheetListScreen';
-import SheetDetailScreen from '../screens/SheetDetailScreen';
+import TabListScreen from '../screens/TabListScreen';
+import TabDetailScreen from '../screens/TabDetailScreen';
 import { colors } from '../theme';
 
 export type RootStackParamList = {
-  MenuList: undefined;
-  SheetList: { menuId: string; menuName: string };
-  SheetDetail: { sheetId: string; sheetName: string };
+  SheetList: undefined;
+  TabList: { sheetId: string; sheetName: string };
+  TabDetail: { sheetId: string; sheetName: string; tabId?: string; tabName?: string };
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -30,7 +30,7 @@ export default function RootNavigator() {
   return (
     <NavigationContainer theme={navigationTheme}>
       <Stack.Navigator
-        initialRouteName="MenuList"
+        initialRouteName="SheetList"
         screenOptions={{
           headerShadowVisible: false,
           headerStyle: { backgroundColor: colors.surface },
@@ -39,16 +39,16 @@ export default function RootNavigator() {
           contentStyle: { backgroundColor: colors.background },
         }}
       >
-        <Stack.Screen name="MenuList" component={MenuListScreen} options={{ title: '메뉴' }} />
+        <Stack.Screen name="SheetList" component={SheetListScreen} options={{ title: '시트' }} />
         <Stack.Screen
-          name="SheetList"
-          component={SheetListScreen}
-          options={({ route }) => ({ title: route.params.menuName })}
+          name="TabList"
+          component={TabListScreen}
+          options={({ route }) => ({ title: route.params.sheetName })}
         />
         <Stack.Screen
-          name="SheetDetail"
-          component={SheetDetailScreen}
-          options={({ route }) => ({ title: route.params.sheetName })}
+          name="TabDetail"
+          component={TabDetailScreen}
+          options={({ route }) => ({ title: route.params.tabName ?? route.params.sheetName })}
         />
       </Stack.Navigator>
     </NavigationContainer>

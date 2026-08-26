@@ -1,12 +1,12 @@
-export interface Menu {
+export interface Sheet {
   id: string;
   name: string;
   order: number;
 }
 
-export interface Sheet {
+export interface Tab {
   id: string;
-  menuId: string;
+  sheetId: string;
   name: string;
   rows: number;
   cols: number;

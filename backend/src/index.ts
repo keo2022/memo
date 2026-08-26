@@ -19,16 +19,16 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-function computeCell(sheetId: string, row: number, col: number, cache: Map<string, number>): number {
+function computeCell(tabId: string, row: number, col: number, cache: Map<string, number>): number {
   const key = `${row}_${col}`;
   if (cache.has(key)) return cache.get(key)!;
 
-  const cells = store.getCells(sheetId);
+  const cells = store.getCells(tabId);
   const cell = cells[key];
   if (!cell) return 0;
 
   if (cell.formula) {
-    const value = evaluateFormula(cell.formula, (r, c) => computeCell(sheetId, r, c, cache));
+    const value = evaluateFormula(cell.formula, (r, c) => computeCell(tabId, r, c, cache));
     cache.set(key, value);
     return value;
   }
@@ -39,101 +39,14 @@ function computeCell(sheetId: string, row: number, col: number, cache: Map<strin
   return value;
 }
 
-app.get('/api/menus', (_req, res) => {
-  res.json(store.listMenus());
+app.get('/api/sheets', (_req, res) => {
+  res.json(store.listSheets());
 });
 
-app.post('/api/menus', (req, res) => {
+app.post('/api/sheets', (req, res) => {
   const { name } = req.body as { name?: string };
   if (!name) return res.status(400).json({ error: 'name is required' });
-  res.status(201).json(store.createMenu(name));
-});
-
-app.put('/api/menus/:menuId', (req, res) => {
-  const { name } = req.body as { name?: string };
-  if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
-
-  const menu = store.renameMenu(req.params.menuId, name.trim());
-  if (!menu) return res.status(404).json({ error: 'menu not found' });
-  res.json(menu);
-});
-
-app.delete('/api/menus/:menuId', (req, res) => {
-  store.deleteMenu(req.params.menuId);
-  res.status(204).end();
-});
-
-app.get('/api/menus/:menuId/sheets', (req, res) => {
-  res.json(store.listSheets(req.params.menuId));
-});
-
-app.post('/api/menus/:menuId/sheets', (req, res) => {
-  const { name, rows, cols } = req.body as { name?: string; rows?: number; cols?: number };
-  if (!name) return res.status(400).json({ error: 'name is required' });
-  res.status(201).json(store.createSheet(req.params.menuId, name, rows, cols));
-});
-
-app.post('/api/sheets/:sheetId/rows', (req, res) => {
-  const sheet = store.getSheet(req.params.sheetId);
-  if (!sheet) return res.status(404).json({ error: 'sheet not found' });
-
-  const { index } = req.body as { index?: number };
-  if (!Number.isInteger(index) || index === undefined || index < 0 || index > sheet.rows) {
-    return res.status(400).json({ error: `index must be between 0 and ${sheet.rows}` });
-  }
-
-  res.json(store.insertRow(sheet.id, index));
-});
-
-app.post('/api/sheets/:sheetId/columns', (req, res) => {
-  const sheet = store.getSheet(req.params.sheetId);
-  if (!sheet) return res.status(404).json({ error: 'sheet not found' });
-
-  const { index } = req.body as { index?: number };
-  if (!Number.isInteger(index) || index === undefined || index < 0 || index > sheet.cols) {
-    return res.status(400).json({ error: `index must be between 0 and ${sheet.cols}` });
-  }
-
-  res.json(store.insertColumn(sheet.id, index));
-});
-
-app.get('/api/sheets/:sheetId', (req, res) => {
-  const sheet = store.getSheet(req.params.sheetId);
-  if (!sheet) return res.status(404).json({ error: 'sheet not found' });
-
-  const cells = store.getCells(sheet.id);
-  const cache = new Map<string, number>();
-  const grid: { row: number; col: number; value: string; formula?: string; computed: number }[] = [];
-
-  for (let r = 0; r < sheet.rows; r++) {
-    for (let c = 0; c < sheet.cols; c++) {
-      const key = `${r}_${c}`;
-      const cell = cells[key];
-      grid.push({
-        row: r,
-        col: c,
-        value: cell?.value ?? '',
-        formula: cell?.formula,
-        computed: computeCell(sheet.id, r, c, cache),
-      });
-    }
-  }
-
-  const formatMap = store.getColumnFormats(sheet.id);
-  const columnFormats: ColumnFormat[] = [];
-  for (let c = 0; c < sheet.cols; c++) {
-    columnFormats.push(formatMap[c] ?? 'text');
-  }
-
-  const widthMap = store.getColumnWidths(sheet.id);
-  const columnWidths: (number | null)[] = [];
-  for (let c = 0; c < sheet.cols; c++) {
-    columnWidths.push(widthMap[c] ?? null);
-  }
-
-  const merges = store.getMerges(sheet.id);
-
-  res.json({ ...sheet, cells: grid, columnFormats, columnWidths, merges });
+  res.status(201).json(store.createSheet(name));
 });
 
 app.put('/api/sheets/:sheetId', (req, res) => {
@@ -150,12 +63,99 @@ app.delete('/api/sheets/:sheetId', (req, res) => {
   res.status(204).end();
 });
 
-app.put('/api/sheets/:sheetId/columns/:col/format', (req, res) => {
-  const sheet = store.getSheet(req.params.sheetId);
-  if (!sheet) return res.status(404).json({ error: 'sheet not found' });
+app.get('/api/sheets/:sheetId/tabs', (req, res) => {
+  res.json(store.listTabs(req.params.sheetId));
+});
+
+app.post('/api/sheets/:sheetId/tabs', (req, res) => {
+  const { name, rows, cols } = req.body as { name?: string; rows?: number; cols?: number };
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  res.status(201).json(store.createTab(req.params.sheetId, name, rows, cols));
+});
+
+app.post('/api/tabs/:tabId/rows', (req, res) => {
+  const tab = store.getTab(req.params.tabId);
+  if (!tab) return res.status(404).json({ error: 'tab not found' });
+
+  const { index } = req.body as { index?: number };
+  if (!Number.isInteger(index) || index === undefined || index < 0 || index > tab.rows) {
+    return res.status(400).json({ error: `index must be between 0 and ${tab.rows}` });
+  }
+
+  res.json(store.insertRow(tab.id, index));
+});
+
+app.post('/api/tabs/:tabId/columns', (req, res) => {
+  const tab = store.getTab(req.params.tabId);
+  if (!tab) return res.status(404).json({ error: 'tab not found' });
+
+  const { index } = req.body as { index?: number };
+  if (!Number.isInteger(index) || index === undefined || index < 0 || index > tab.cols) {
+    return res.status(400).json({ error: `index must be between 0 and ${tab.cols}` });
+  }
+
+  res.json(store.insertColumn(tab.id, index));
+});
+
+app.get('/api/tabs/:tabId', (req, res) => {
+  const tab = store.getTab(req.params.tabId);
+  if (!tab) return res.status(404).json({ error: 'tab not found' });
+
+  const cells = store.getCells(tab.id);
+  const cache = new Map<string, number>();
+  const grid: { row: number; col: number; value: string; formula?: string; computed: number }[] = [];
+
+  for (let r = 0; r < tab.rows; r++) {
+    for (let c = 0; c < tab.cols; c++) {
+      const key = `${r}_${c}`;
+      const cell = cells[key];
+      grid.push({
+        row: r,
+        col: c,
+        value: cell?.value ?? '',
+        formula: cell?.formula,
+        computed: computeCell(tab.id, r, c, cache),
+      });
+    }
+  }
+
+  const formatMap = store.getColumnFormats(tab.id);
+  const columnFormats: ColumnFormat[] = [];
+  for (let c = 0; c < tab.cols; c++) {
+    columnFormats.push(formatMap[c] ?? 'text');
+  }
+
+  const widthMap = store.getColumnWidths(tab.id);
+  const columnWidths: (number | null)[] = [];
+  for (let c = 0; c < tab.cols; c++) {
+    columnWidths.push(widthMap[c] ?? null);
+  }
+
+  const merges = store.getMerges(tab.id);
+
+  res.json({ ...tab, cells: grid, columnFormats, columnWidths, merges });
+});
+
+app.put('/api/tabs/:tabId', (req, res) => {
+  const { name } = req.body as { name?: string };
+  if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
+
+  const tab = store.renameTab(req.params.tabId, name.trim());
+  if (!tab) return res.status(404).json({ error: 'tab not found' });
+  res.json(tab);
+});
+
+app.delete('/api/tabs/:tabId', (req, res) => {
+  store.deleteTab(req.params.tabId);
+  res.status(204).end();
+});
+
+app.put('/api/tabs/:tabId/columns/:col/format', (req, res) => {
+  const tab = store.getTab(req.params.tabId);
+  if (!tab) return res.status(404).json({ error: 'tab not found' });
 
   const col = Number(req.params.col);
-  if (!Number.isInteger(col) || col < 0 || col >= sheet.cols) {
+  if (!Number.isInteger(col) || col < 0 || col >= tab.cols) {
     return res.status(400).json({ error: 'invalid column' });
   }
 
@@ -164,19 +164,19 @@ app.put('/api/sheets/:sheetId/columns/:col/format', (req, res) => {
     return res.status(400).json({ error: `format must be one of ${COLUMN_FORMATS.join(', ')}` });
   }
 
-  store.setColumnFormat(sheet.id, col, format);
+  store.setColumnFormat(tab.id, col, format);
   res.json({ col, format });
 });
 
 const MIN_COLUMN_WIDTH = 40;
 const MAX_COLUMN_WIDTH = 400;
 
-app.put('/api/sheets/:sheetId/columns/:col/width', (req, res) => {
-  const sheet = store.getSheet(req.params.sheetId);
-  if (!sheet) return res.status(404).json({ error: 'sheet not found' });
+app.put('/api/tabs/:tabId/columns/:col/width', (req, res) => {
+  const tab = store.getTab(req.params.tabId);
+  if (!tab) return res.status(404).json({ error: 'tab not found' });
 
   const col = Number(req.params.col);
-  if (!Number.isInteger(col) || col < 0 || col >= sheet.cols) {
+  if (!Number.isInteger(col) || col < 0 || col >= tab.cols) {
     return res.status(400).json({ error: 'invalid column' });
   }
 
@@ -187,13 +187,13 @@ app.put('/api/sheets/:sheetId/columns/:col/width', (req, res) => {
     }
   }
 
-  store.setColumnWidth(sheet.id, col, width ?? null);
+  store.setColumnWidth(tab.id, col, width ?? null);
   res.json({ col, width: width ?? null });
 });
 
-app.put('/api/sheets/:sheetId/merges', (req, res) => {
-  const sheet = store.getSheet(req.params.sheetId);
-  if (!sheet) return res.status(404).json({ error: 'sheet not found' });
+app.put('/api/tabs/:tabId/merges', (req, res) => {
+  const tab = store.getTab(req.params.tabId);
+  if (!tab) return res.status(404).json({ error: 'tab not found' });
 
   const { anchorRow, anchorCol, rowSpan, colSpan } = req.body as {
     anchorRow: number;
@@ -211,33 +211,33 @@ app.put('/api/sheets/:sheetId/merges', (req, res) => {
     colSpan < 1 ||
     anchorRow < 0 ||
     anchorCol < 0 ||
-    anchorRow + rowSpan > sheet.rows ||
-    anchorCol + colSpan > sheet.cols
+    anchorRow + rowSpan > tab.rows ||
+    anchorCol + colSpan > tab.cols
   ) {
     return res.status(400).json({ error: 'invalid merge range' });
   }
 
   if (rowSpan === 1 && colSpan === 1) {
-    store.deleteMerge(sheet.id, anchorRow, anchorCol);
+    store.deleteMerge(tab.id, anchorRow, anchorCol);
     return res.json({ anchorRow, anchorCol, rowSpan: 1, colSpan: 1 });
   }
 
   const next: Merge = { anchorRow, anchorCol, rowSpan, colSpan };
   const overlaps = store
-    .getMerges(sheet.id)
+    .getMerges(tab.id)
     .filter((m) => !(m.anchorRow === anchorRow && m.anchorCol === anchorCol))
     .some((m) => mergesOverlap(m, next));
   if (overlaps) {
     return res.status(409).json({ error: 'overlaps an existing merged range' });
   }
 
-  store.setMerge(sheet.id, anchorRow, anchorCol, rowSpan, colSpan);
+  store.setMerge(tab.id, anchorRow, anchorCol, rowSpan, colSpan);
   res.json(next);
 });
 
-app.put('/api/sheets/:sheetId/cells', (req, res) => {
-  const sheet = store.getSheet(req.params.sheetId);
-  if (!sheet) return res.status(404).json({ error: 'sheet not found' });
+app.put('/api/tabs/:tabId/cells', (req, res) => {
+  const tab = store.getTab(req.params.tabId);
+  if (!tab) return res.status(404).json({ error: 'tab not found' });
 
   const { row, col, value, formula } = req.body as {
     row: number;
@@ -246,10 +246,10 @@ app.put('/api/sheets/:sheetId/cells', (req, res) => {
     formula?: string;
   };
   const data: CellData = { value: value ?? '', formula };
-  store.setCell(sheet.id, row, col, data);
+  store.setCell(tab.id, row, col, data);
 
   const cache = new Map<string, number>();
-  const computed = computeCell(sheet.id, row, col, cache);
+  const computed = computeCell(tab.id, row, col, cache);
   res.json({ row, col, ...data, computed });
 });
 

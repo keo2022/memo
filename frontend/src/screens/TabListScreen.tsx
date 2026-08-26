@@ -5,72 +5,78 @@ import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/RootNavigator';
 import { api } from '../db/repository';
-import type { Menu } from '../types';
+import type { Tab } from '../types';
 import { colors, radius, spacing, shadow } from '../theme';
 import ItemActionModal from '../components/ItemActionModal';
 import NamePromptModal from '../components/NamePromptModal';
 
-type Props = NativeStackScreenProps<RootStackParamList, 'MenuList'>;
+type Props = NativeStackScreenProps<RootStackParamList, 'TabList'>;
 
-export default function MenuListScreen({ navigation }: Props) {
-  const [menus, setMenus] = useState<Menu[]>([]);
+export default function TabListScreen({ route, navigation }: Props) {
+  const { sheetId, sheetName } = route.params;
+  const [tabs, setTabs] = useState<Tab[]>([]);
   const [loading, setLoading] = useState(false);
-  const [actionTarget, setActionTarget] = useState<Menu | null>(null);
+  const [actionTarget, setActionTarget] = useState<Tab | null>(null);
   const [addModalVisible, setAddModalVisible] = useState(false);
 
-  const loadMenus = useCallback(async () => {
+  const loadTabs = useCallback(async () => {
     try {
       setLoading(true);
-      setMenus(await api.getMenus());
+      setTabs(await api.getTabs(sheetId));
     } catch (e) {
-      Alert.alert('메뉴를 불러오지 못했습니다', String(e));
+      Alert.alert('탭을 불러오지 못했습니다', String(e));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [sheetId]);
 
   useFocusEffect(
     useCallback(() => {
-      loadMenus();
-    }, [loadMenus])
+      loadTabs();
+    }, [loadTabs])
   );
 
-  const handleAddMenu = async (name: string) => {
+  const handleAddTab = async (name: string) => {
     try {
-      await api.createMenu(name);
-      loadMenus();
+      await api.createTab(sheetId, name);
+      loadTabs();
     } catch (e) {
-      Alert.alert('메뉴 생성 실패', String(e));
+      Alert.alert('탭 생성 실패', String(e));
     }
   };
 
   return (
     <View style={styles.container}>
       <FlatList
-        data={menus}
+        data={tabs}
         keyExtractor={(item) => item.id}
         refreshing={loading}
-        onRefresh={loadMenus}
-        contentContainerStyle={menus.length === 0 ? styles.emptyContainer : styles.listContent}
+        onRefresh={loadTabs}
+        contentContainerStyle={tabs.length === 0 ? styles.emptyContainer : styles.listContent}
         ListEmptyComponent={
           <View style={styles.empty}>
-            <Ionicons name="file-tray-outline" size={40} color={colors.textMuted} />
-            <Text style={styles.emptyText}>메뉴가 없습니다{'\n'}아래 + 버튼으로 새 메뉴를 추가해보세요</Text>
+            <Ionicons name="grid-outline" size={40} color={colors.textMuted} />
+            <Text style={styles.emptyText}>탭이 없습니다{'\n'}아래 + 버튼으로 새 탭을 추가해보세요</Text>
           </View>
         }
         renderItem={({ item }) => (
           <TouchableOpacity
-            style={styles.menuItem}
+            style={styles.tabItem}
             activeOpacity={0.7}
-            onPress={() => navigation.navigate('SheetList', { menuId: item.id, menuName: item.name })}
+            onPress={() => navigation.navigate('TabDetail', { sheetId, sheetName, tabId: item.id, tabName: item.name })}
             onLongPress={() => setActionTarget(item)}
           >
-            <View style={styles.menuIconWrap}>
-              <Ionicons name="folder" size={20} color={colors.primary} />
+            <View style={styles.tabIconWrap}>
+              <Ionicons name="grid" size={20} color={colors.primary} />
             </View>
-            <Text style={styles.menuItemText} numberOfLines={1}>
-              {item.name}
-            </Text>
+            <View style={styles.tabTextWrap}>
+              <Text style={styles.tabItemText} numberOfLines={1}>
+                {item.name}
+              </Text>
+              <Text style={styles.tabSubText}>
+                {item.rows}행 × {item.cols}열
+              </Text>
+            </View>
             <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
           </TouchableOpacity>
         )}
@@ -82,23 +88,23 @@ export default function MenuListScreen({ navigation }: Props) {
 
       <NamePromptModal
         visible={addModalVisible}
-        title="새 메뉴 추가"
-        placeholder="메뉴 이름"
+        title="새 탭 추가"
+        placeholder="탭 이름"
         onClose={() => setAddModalVisible(false)}
-        onConfirm={handleAddMenu}
+        onConfirm={handleAddTab}
       />
 
       <ItemActionModal
         visible={!!actionTarget}
         itemName={actionTarget?.name ?? ''}
-        itemTypeLabel="메뉴"
-        deleteWarning={`"${actionTarget?.name ?? ''}" 메뉴와 그 안의 모든 시트·데이터가 완전히 삭제됩니다. 이 작업은 되돌릴 수 없어요.`}
+        itemTypeLabel="탭"
+        deleteWarning={`"${actionTarget?.name ?? ''}" 탭의 모든 데이터가 완전히 삭제됩니다. 이 작업은 되돌릴 수 없어요.`}
         onClose={() => setActionTarget(null)}
         onRename={async (name) => {
           if (!actionTarget) return;
           try {
-            await api.renameMenu(actionTarget.id, name);
-            loadMenus();
+            await api.renameTab(actionTarget.id, name);
+            loadTabs();
           } catch (e) {
             Alert.alert('이름 변경 실패', String(e));
           }
@@ -106,8 +112,8 @@ export default function MenuListScreen({ navigation }: Props) {
         onDelete={async () => {
           if (!actionTarget) return;
           try {
-            await api.deleteMenu(actionTarget.id);
-            loadMenus();
+            await api.deleteTab(actionTarget.id);
+            loadTabs();
           } catch (e) {
             Alert.alert('삭제 실패', String(e));
           }
@@ -133,7 +139,7 @@ const styles = StyleSheet.create({
   },
   listContent: { paddingBottom: spacing.xl * 2 },
   emptyContainer: { flexGrow: 1 },
-  menuItem: {
+  tabItem: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: colors.surface,
@@ -142,7 +148,7 @@ const styles = StyleSheet.create({
     marginBottom: spacing.sm,
     ...shadow.card,
   },
-  menuIconWrap: {
+  tabIconWrap: {
     width: 36,
     height: 36,
     borderRadius: radius.sm,
@@ -151,7 +157,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginRight: spacing.md,
   },
-  menuItemText: { flex: 1, fontSize: 16, fontWeight: '600', color: colors.textPrimary },
+  tabTextWrap: { flex: 1 },
+  tabItemText: { fontSize: 16, fontWeight: '600', color: colors.textPrimary },
+  tabSubText: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
   empty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: spacing.md },
   emptyText: { textAlign: 'center', color: colors.textMuted, fontSize: 14, lineHeight: 20 },
 });
