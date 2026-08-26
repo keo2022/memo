@@ -1,4 +1,4 @@
-const TOKEN_REGEX = /[A-Za-z]+[0-9]+:[A-Za-z]+[0-9]+|[A-Za-z]+[0-9]+|[A-Za-z]+|[0-9]+(\.[0-9]+)?|[()+\-*/,]/g;
+const TOKEN_REGEX = /[A-Za-z]+[0-9]+:[A-Za-z]+[0-9]+|[A-Za-z]+[0-9]+|[A-Za-z]+|[0-9]+(\.[0-9]+)?|>=|<=|<>|[()+\-*/,<>=]/g;
 const CELL_REF = /^[A-Za-z]+[0-9]+$/;
 
 function colLettersToIndex(letters: string): number {
@@ -31,17 +31,28 @@ function cellRefToString(row: number, col: number): string {
 }
 
 /**
- * 탭에 행/열이 중간에 삽입될 때, 수식 안의 셀 참조(A1, A1:A3 등)가 계속 같은 칸을
- * 가리키도록 좌표를 밀어줍니다. (Excel이 행/열 삽입 시 수식을 자동으로 조정하는 것과 동일한 개념)
+ * 탭에 행/열이 중간에 삽입되거나 삭제될 때, 수식 안의 셀 참조(A1, A1:A3 등)가 계속 같은 칸을
+ * 가리키도록 좌표를 밀어줍니다. (Excel이 행/열 삽입·삭제 시 수식을 자동으로 조정하는 것과 동일한 개념)
+ * 삭제된 바로 그 칸을 가리키던 참조는 되돌릴 방법이 없어서, 그 자리로 새로 밀려온 칸을 가리키게 둡니다.
  */
-export function shiftFormulaRefs(formula: string, axis: 'row' | 'col', insertIndex: number): string {
+export function shiftFormulaRefs(
+  formula: string,
+  axis: 'row' | 'col',
+  index: number,
+  direction: 'insert' | 'delete' = 'insert'
+): string {
   const expr = formula.startsWith('=') ? formula.slice(1) : formula;
   const tokens = expr.match(TOKEN_REGEX) ?? [];
 
   const shiftRef = (ref: string): string => {
     const { row, col } = parseCellRef(ref);
-    if (axis === 'row' && row >= insertIndex) return cellRefToString(row + 1, col);
-    if (axis === 'col' && col >= insertIndex) return cellRefToString(row, col + 1);
+    if (direction === 'insert') {
+      if (axis === 'row' && row >= index) return cellRefToString(row + 1, col);
+      if (axis === 'col' && col >= index) return cellRefToString(row, col + 1);
+    } else {
+      if (axis === 'row' && row > index) return cellRefToString(row - 1, col);
+      if (axis === 'col' && col > index) return cellRefToString(row, col - 1);
+    }
     return cellRefToString(row, col);
   };
 

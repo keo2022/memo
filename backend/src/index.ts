@@ -49,6 +49,16 @@ app.post('/api/sheets', (req, res) => {
   res.status(201).json(store.createSheet(name));
 });
 
+// :sheetId 라우트보다 먼저 등록해야 "reorder"가 sheetId로 매칭되지 않습니다.
+app.put('/api/sheets/reorder', (req, res) => {
+  const { orderedIds } = req.body as { orderedIds?: string[] };
+  if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
+    return res.status(400).json({ error: 'orderedIds is required' });
+  }
+  store.reorderSheets(orderedIds);
+  res.json(store.listSheets());
+});
+
 app.put('/api/sheets/:sheetId', (req, res) => {
   const { name } = req.body as { name?: string };
   if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
@@ -73,6 +83,15 @@ app.post('/api/sheets/:sheetId/tabs', (req, res) => {
   res.status(201).json(store.createTab(req.params.sheetId, name, rows, cols));
 });
 
+app.put('/api/sheets/:sheetId/tabs/reorder', (req, res) => {
+  const { orderedIds } = req.body as { orderedIds?: string[] };
+  if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
+    return res.status(400).json({ error: 'orderedIds is required' });
+  }
+  store.reorderTabs(req.params.sheetId, orderedIds);
+  res.json(store.listTabs(req.params.sheetId));
+});
+
 app.post('/api/tabs/:tabId/rows', (req, res) => {
   const tab = store.getTab(req.params.tabId);
   if (!tab) return res.status(404).json({ error: 'tab not found' });
@@ -95,6 +114,42 @@ app.post('/api/tabs/:tabId/columns', (req, res) => {
   }
 
   res.json(store.insertColumn(tab.id, index));
+});
+
+app.delete('/api/tabs/:tabId/rows/:index', (req, res) => {
+  const tab = store.getTab(req.params.tabId);
+  if (!tab) return res.status(404).json({ error: 'tab not found' });
+
+  const index = Number(req.params.index);
+  if (!Number.isInteger(index) || index < 0 || index >= tab.rows) {
+    return res.status(400).json({ error: `index must be between 0 and ${tab.rows - 1}` });
+  }
+  if (tab.rows <= 1) {
+    return res.status(400).json({ error: 'must keep at least 1 row' });
+  }
+
+  res.json(store.deleteRow(tab.id, index));
+});
+
+app.delete('/api/tabs/:tabId/columns/:index', (req, res) => {
+  const tab = store.getTab(req.params.tabId);
+  if (!tab) return res.status(404).json({ error: 'tab not found' });
+
+  const index = Number(req.params.index);
+  if (!Number.isInteger(index) || index < 0 || index >= tab.cols) {
+    return res.status(400).json({ error: `index must be between 0 and ${tab.cols - 1}` });
+  }
+  if (tab.cols <= 1) {
+    return res.status(400).json({ error: 'must keep at least 1 column' });
+  }
+
+  res.json(store.deleteColumn(tab.id, index));
+});
+
+app.post('/api/tabs/:tabId/undo-delete', (req, res) => {
+  const tab = store.undoLastDelete(req.params.tabId);
+  if (!tab) return res.status(404).json({ error: 'nothing to undo' });
+  res.json(tab);
 });
 
 app.get('/api/tabs/:tabId', (req, res) => {

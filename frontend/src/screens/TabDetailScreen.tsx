@@ -9,6 +9,8 @@ import {
   TextInput,
   Alert,
   ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
@@ -18,6 +20,7 @@ import { api } from '../db/repository';
 import type { CellInfo, ColumnFormat, Merge, Tab, TabDetail } from '../types';
 import { colors, radius, spacing, shadow } from '../theme';
 import NamePromptModal from '../components/NamePromptModal';
+import Snackbar from '../components/Snackbar';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'TabDetail'>;
 
@@ -89,11 +92,14 @@ export default function TabDetailScreen({ route, navigation }: Props) {
   const [siblings, setSiblings] = useState<Tab[]>([]);
   const [loading, setLoading] = useState(true);
   const [addTabModalVisible, setAddTabModalVisible] = useState(false);
+  const [snackbar, setSnackbar] = useState<{ message: string } | null>(null);
   const [selected, setSelected] = useState<CellInfo | null>(null);
   const [draft, setDraft] = useState('');
+  const [savingCell, setSavingCell] = useState(false);
   const [resizing, setResizing] = useState(false);
   const [formatPickerCol, setFormatPickerCol] = useState<number | null>(null);
   const [insertPrompt, setInsertPrompt] = useState<{ axis: 'row' | 'col'; index: number } | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<{ axis: 'row' | 'col'; index: number } | null>(null);
   const [mergeTarget, setMergeTarget] = useState<{ row: number; col: number; rowSpan: number; colSpan: number } | null>(
     null
   );
@@ -236,13 +242,16 @@ export default function TabDetailScreen({ route, navigation }: Props) {
   };
 
   const saveCheckbox = async (value: string) => {
-    if (!selected) return;
+    if (!selected || savingCell) return;
+    setSavingCell(true);
     try {
       await api.updateCell(tab.id, selected.row, selected.col, value);
       setSelected(null);
-      loadTab();
+      await loadTab();
     } catch (e) {
       Alert.alert('저장 실패', String(e));
+    } finally {
+      setSavingCell(false);
     }
   };
 
@@ -353,6 +362,44 @@ export default function TabDetailScreen({ route, navigation }: Props) {
     }
   };
 
+  const deleteRowAt = async (index: number) => {
+    if (resizing) return;
+    setResizing(true);
+    try {
+      await api.deleteRow(tab.id, index);
+      await loadTab();
+      setSnackbar({ message: '행이 삭제되었습니다' });
+    } catch (e) {
+      Alert.alert('행 삭제 실패', String(e));
+    } finally {
+      setResizing(false);
+    }
+  };
+
+  const deleteColumnAt = async (index: number) => {
+    if (resizing) return;
+    setResizing(true);
+    try {
+      await api.deleteColumn(tab.id, index);
+      await loadTab();
+      setSnackbar({ message: '열이 삭제되었습니다' });
+    } catch (e) {
+      Alert.alert('열 삭제 실패', String(e));
+    } finally {
+      setResizing(false);
+    }
+  };
+
+  const handleUndoDelete = async () => {
+    setSnackbar(null);
+    try {
+      await api.undoLastDelete(tab.id);
+      await loadTab();
+    } catch (e) {
+      Alert.alert('실행취소 실패', String(e));
+    }
+  };
+
   const promptInsertRow = (row: number) => setInsertPrompt({ axis: 'row', index: row });
   const promptInsertColumn = (col: number) => setInsertPrompt({ axis: 'col', index: col });
 
@@ -365,9 +412,25 @@ export default function TabDetailScreen({ route, navigation }: Props) {
     else insertColumnAt(target);
   };
 
+  const confirmDelete = () => {
+    if (!insertPrompt) return;
+    const { axis, index } = insertPrompt;
+    setInsertPrompt(null);
+    setDeleteConfirm({ axis, index });
+  };
+
+  const executeDelete = () => {
+    if (!deleteConfirm) return;
+    const { axis, index } = deleteConfirm;
+    setDeleteConfirm(null);
+    if (axis === 'row') deleteRowAt(index);
+    else deleteColumnAt(index);
+  };
+
   const saveCell = async () => {
-    if (!selected) return;
+    if (!selected || savingCell) return;
     const isFormula = draft.trim().startsWith('=');
+    setSavingCell(true);
     try {
       await api.updateCell(
         tab.id,
@@ -377,9 +440,25 @@ export default function TabDetailScreen({ route, navigation }: Props) {
         isFormula ? draft.trim() : undefined
       );
       setSelected(null);
-      loadTab();
+      await loadTab();
     } catch (e) {
       Alert.alert('저장 실패', String(e));
+    } finally {
+      setSavingCell(false);
+    }
+  };
+
+  const clearCell = async () => {
+    if (!selected || savingCell) return;
+    setSavingCell(true);
+    try {
+      await api.updateCell(tab.id, selected.row, selected.col, '');
+      setSelected(null);
+      await loadTab();
+    } catch (e) {
+      Alert.alert('지우기 실패', String(e));
+    } finally {
+      setSavingCell(false);
     }
   };
 
@@ -510,8 +589,11 @@ export default function TabDetailScreen({ route, navigation }: Props) {
         </ScrollView>
       </View>
 
-      <Modal visible={!!selected} transparent animationType="fade" onRequestClose={() => setSelected(null)}>
-        <View style={styles.modalBackdrop}>
+      <Modal visible={!!selected} transparent animationType="fade" onRequestClose={() => !savingCell && setSelected(null)}>
+        <KeyboardAvoidingView
+          style={styles.modalBackdrop}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
               <View style={styles.modalBadge}>
@@ -519,7 +601,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
                   {selected ? `${colLabel(selected.col)}${selected.row + 1}` : ''}
                 </Text>
               </View>
-              <TouchableOpacity onPress={() => setSelected(null)} hitSlop={8}>
+              <TouchableOpacity onPress={() => setSelected(null)} hitSlop={8} disabled={savingCell}>
                 <Ionicons name="close" size={22} color={colors.textMuted} />
               </TouchableOpacity>
             </View>
@@ -528,8 +610,13 @@ export default function TabDetailScreen({ route, navigation }: Props) {
               <>
                 <View style={styles.checkboxChoiceRow}>
                   <TouchableOpacity
-                    style={[styles.checkboxChoiceButton, selected.value === 'O' && styles.checkboxChoiceButtonActive]}
+                    style={[
+                      styles.checkboxChoiceButton,
+                      selected.value === 'O' && styles.checkboxChoiceButtonActive,
+                      savingCell && styles.modalButtonDisabled,
+                    ]}
                     onPress={() => saveCheckbox('O')}
+                    disabled={savingCell}
                   >
                     <Ionicons
                       name="checkmark-circle"
@@ -543,8 +630,13 @@ export default function TabDetailScreen({ route, navigation }: Props) {
                     </Text>
                   </TouchableOpacity>
                   <TouchableOpacity
-                    style={[styles.checkboxChoiceButton, selected.value === 'X' && styles.checkboxChoiceButtonActiveDanger]}
+                    style={[
+                      styles.checkboxChoiceButton,
+                      selected.value === 'X' && styles.checkboxChoiceButtonActiveDanger,
+                      savingCell && styles.modalButtonDisabled,
+                    ]}
                     onPress={() => saveCheckbox('X')}
+                    disabled={savingCell}
                   >
                     <Ionicons
                       name="close-circle"
@@ -558,8 +650,13 @@ export default function TabDetailScreen({ route, navigation }: Props) {
                     </Text>
                   </TouchableOpacity>
                   <TouchableOpacity
-                    style={[styles.checkboxChoiceButton, selected.value === '' && styles.checkboxChoiceButtonActiveMuted]}
+                    style={[
+                      styles.checkboxChoiceButton,
+                      selected.value === '' && styles.checkboxChoiceButtonActiveMuted,
+                      savingCell && styles.modalButtonDisabled,
+                    ]}
                     onPress={() => saveCheckbox('')}
+                    disabled={savingCell}
                   >
                     <Ionicons
                       name="ellipse-outline"
@@ -575,7 +672,11 @@ export default function TabDetailScreen({ route, navigation }: Props) {
                 </View>
 
                 <View style={styles.modalActions}>
-                  <TouchableOpacity onPress={() => setSelected(null)} style={[styles.modalButton, styles.modalCancel]}>
+                  <TouchableOpacity
+                    onPress={() => setSelected(null)}
+                    style={[styles.modalButton, styles.modalCancel]}
+                    disabled={savingCell}
+                  >
                     <Text style={styles.modalCancelText}>취소</Text>
                   </TouchableOpacity>
                 </View>
@@ -590,32 +691,64 @@ export default function TabDetailScreen({ route, navigation }: Props) {
                   autoFocus
                   multiline
                   textAlignVertical="top"
+                  editable={!savingCell}
+                  keyboardType={
+                    selected && tab.columnFormats[selected.col] === 'number' && !selected.formula
+                      ? 'numeric'
+                      : 'default'
+                  }
                 />
 
                 {selected && tab.columnFormats[selected.col] === 'number' && !draft.trim().startsWith('=') && (
                   <View style={styles.unitRow}>
                     {NUMBER_UNITS.map((u) => (
-                      <TouchableOpacity key={u.label} style={styles.unitButton} onPress={() => applyUnit(u.multiplier)}>
+                      <TouchableOpacity
+                        key={u.label}
+                        style={styles.unitButton}
+                        onPress={() => applyUnit(u.multiplier)}
+                        disabled={savingCell}
+                      >
                         <Text style={styles.unitButtonText}>×{u.label}</Text>
                       </TouchableOpacity>
                     ))}
                   </View>
                 )}
 
-                <Text style={styles.modalHint}>지원 함수: SUM · AVERAGE · MAX · MIN</Text>
+                <Text style={styles.modalHint}>지원 함수: SUM · AVERAGE · MAX · MIN · COUNT · ROUND · IF</Text>
 
                 <View style={styles.modalActions}>
-                  <TouchableOpacity onPress={() => setSelected(null)} style={[styles.modalButton, styles.modalCancel]}>
+                  {(selected?.value !== '' || !!selected?.formula) && (
+                    <TouchableOpacity
+                      onPress={clearCell}
+                      style={[styles.modalButton, styles.modalCancel]}
+                      disabled={savingCell}
+                    >
+                      <Text style={styles.modalDangerText}>비우기</Text>
+                    </TouchableOpacity>
+                  )}
+                  <TouchableOpacity
+                    onPress={() => setSelected(null)}
+                    style={[styles.modalButton, styles.modalCancel]}
+                    disabled={savingCell}
+                  >
                     <Text style={styles.modalCancelText}>취소</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity onPress={saveCell} style={[styles.modalButton, styles.modalPrimary]}>
-                    <Text style={styles.modalPrimaryText}>저장</Text>
+                  <TouchableOpacity
+                    onPress={saveCell}
+                    style={[styles.modalButton, styles.modalPrimary, savingCell && styles.modalButtonDisabled]}
+                    disabled={savingCell}
+                  >
+                    {savingCell ? (
+                      <ActivityIndicator color={colors.white} size="small" />
+                    ) : (
+                      <Text style={styles.modalPrimaryText}>저장</Text>
+                    )}
                   </TouchableOpacity>
                 </View>
               </>
             )}
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       <Modal
@@ -773,7 +906,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
               </View>
             </TouchableOpacity>
 
-            <TouchableOpacity style={[styles.formatOption, styles.formatOptionLast]} onPress={() => confirmInsert('after')}>
+            <TouchableOpacity style={styles.formatOption} onPress={() => confirmInsert('after')}>
               <View style={styles.formatOptionIconWrap}>
                 <Ionicons
                   name={insertPrompt?.axis === 'row' ? 'arrow-down' : 'arrow-forward'}
@@ -787,6 +920,52 @@ export default function TabDetailScreen({ route, navigation }: Props) {
                 </Text>
               </View>
             </TouchableOpacity>
+
+            {insertPrompt && (insertPrompt.axis === 'row' ? tab.rows : tab.cols) > 1 && (
+              <TouchableOpacity
+                style={[styles.formatOption, styles.formatOptionLast]}
+                onPress={confirmDelete}
+              >
+                <View style={[styles.formatOptionIconWrap, styles.formatOptionIconWrapDanger]}>
+                  <Ionicons name="trash-outline" size={18} color={colors.danger} />
+                </View>
+                <View style={styles.formatOptionTextWrap}>
+                  <Text style={[styles.formatOptionLabel, styles.formatOptionLabelDanger]}>
+                    {insertPrompt.axis === 'row' ? '이 행 삭제' : '이 열 삭제'}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={!!deleteConfirm} transparent animationType="fade" onRequestClose={() => setDeleteConfirm(null)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.formatPickerTitle}>{deleteConfirm?.axis === 'row' ? '행 삭제' : '열 삭제'}</Text>
+              <TouchableOpacity onPress={() => setDeleteConfirm(null)} hitSlop={8}>
+                <Ionicons name="close" size={22} color={colors.textMuted} />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.modalWarning}>
+              {deleteConfirm?.axis === 'row'
+                ? `${deleteConfirm.index + 1}행을 삭제할까요? 이 행의 데이터가 사라집니다.`
+                : deleteConfirm
+                  ? `${colLabel(deleteConfirm.index)}열을 삭제할까요? 이 열의 데이터가 사라집니다.`
+                  : ''}
+            </Text>
+
+            <View style={styles.modalActions}>
+              <TouchableOpacity onPress={() => setDeleteConfirm(null)} style={[styles.modalButton, styles.modalCancel]}>
+                <Text style={styles.modalCancelText}>취소</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={executeDelete} style={[styles.modalButton, styles.modalDanger]}>
+                <Text style={styles.modalPrimaryText}>삭제</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       </Modal>
@@ -797,6 +976,14 @@ export default function TabDetailScreen({ route, navigation }: Props) {
         placeholder="탭 이름"
         onClose={() => setAddTabModalVisible(false)}
         onConfirm={handleAddTab}
+      />
+
+      <Snackbar
+        visible={!!snackbar}
+        message={snackbar?.message ?? ''}
+        actionLabel="실행취소"
+        onAction={handleUndoDelete}
+        onDismiss={() => setSnackbar(null)}
       />
     </View>
   );
@@ -874,12 +1061,16 @@ const styles = StyleSheet.create({
     maxHeight: 160,
   },
   modalHint: { color: colors.textMuted, fontSize: 12, marginTop: spacing.sm, marginBottom: spacing.md },
-  modalActions: { flexDirection: 'row', justifyContent: 'flex-end' },
+  modalActions: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: spacing.lg },
   modalButton: { paddingHorizontal: spacing.lg, paddingVertical: 10, borderRadius: radius.sm, marginLeft: spacing.sm },
   modalCancel: { backgroundColor: colors.background, borderWidth: 1, borderColor: colors.border },
   modalCancelText: { color: colors.textSecondary, fontWeight: '600' },
+  modalDangerText: { color: colors.danger, fontWeight: '600' },
   modalPrimary: { backgroundColor: colors.primary },
   modalPrimaryText: { color: colors.white, fontWeight: '700' },
+  modalDanger: { backgroundColor: colors.danger },
+  modalWarning: { fontSize: 14, color: colors.textSecondary, lineHeight: 20 },
+  modalButtonDisabled: { opacity: 0.5 },
   unitRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm },
   unitButton: {
     flex: 1,
@@ -928,8 +1119,10 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginRight: spacing.md,
   },
+  formatOptionIconWrapDanger: { backgroundColor: '#FCE7E7' },
   formatOptionTextWrap: { flex: 1 },
   formatOptionLabel: { fontSize: 14, fontWeight: '700', color: colors.textPrimary },
+  formatOptionLabelDanger: { color: colors.danger },
   formatOptionDesc: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
   widthSection: { borderTopWidth: 1, borderTopColor: colors.border, paddingTop: spacing.md, marginTop: spacing.sm },
   widthLinkRow: { flexDirection: 'row', justifyContent: 'center', gap: spacing.lg, marginTop: spacing.xs },

@@ -18,9 +18,11 @@ function parseCellRef(ref: string): { row: number; col: number } {
 }
 
 function tokenize(formula: string): string[] {
-  const regex = /[A-Za-z]+[0-9]+:[A-Za-z]+[0-9]+|[A-Za-z]+[0-9]+|[A-Za-z]+|[0-9]+(\.[0-9]+)?|[()+\-*/,]/g;
+  const regex = /[A-Za-z]+[0-9]+:[A-Za-z]+[0-9]+|[A-Za-z]+[0-9]+|[A-Za-z]+|[0-9]+(\.[0-9]+)?|>=|<=|<>|[()+\-*/,<>=]/g;
   return formula.match(regex) ?? [];
 }
+
+const COMPARISON_OPS = ['>=', '<=', '<>', '>', '<', '='];
 
 class Parser {
   private pos = 0;
@@ -33,6 +35,31 @@ class Parser {
 
   private next(): string {
     return this.tokens[this.pos++];
+  }
+
+  // IF의 조건처럼 "A1>10" 같은 비교식이 필요한 자리에서 씁니다. 비교 연산자가 없으면 그냥 일반 수식값을 반환합니다.
+  parseComparison(): number {
+    const value = this.parseExpression();
+    const op = this.peek();
+    if (op !== undefined && COMPARISON_OPS.includes(op)) {
+      this.next();
+      const rhs = this.parseExpression();
+      switch (op) {
+        case '>':
+          return value > rhs ? 1 : 0;
+        case '<':
+          return value < rhs ? 1 : 0;
+        case '>=':
+          return value >= rhs ? 1 : 0;
+        case '<=':
+          return value <= rhs ? 1 : 0;
+        case '<>':
+          return value !== rhs ? 1 : 0;
+        case '=':
+          return value === rhs ? 1 : 0;
+      }
+    }
+    return value;
   }
 
   parseExpression(): number {
@@ -101,7 +128,7 @@ class Parser {
           }
         }
       } else {
-        args.push(this.parseExpression());
+        args.push(this.parseComparison());
       }
       if (this.peek() === ',') this.next();
     }
@@ -116,6 +143,18 @@ class Parser {
         return args.length ? Math.max(...args) : 0;
       case 'MIN':
         return args.length ? Math.min(...args) : 0;
+      // 빈 셀과 값이 0인 셀을 구분할 수 없어서, 정확한 COUNT 대신 "0이 아닌 값의 개수"로 근사합니다.
+      case 'COUNT':
+        return args.filter((v) => v !== 0).length;
+      case 'ROUND': {
+        const [num, digits] = args;
+        const factor = Math.pow(10, digits ?? 0);
+        return Math.round((num ?? 0) * factor) / factor;
+      }
+      case 'IF': {
+        const [cond, whenTrue, whenFalse] = args;
+        return cond ? whenTrue ?? 0 : whenFalse ?? 0;
+      }
       default:
         throw new Error(`Unknown function: ${name}`);
     }
@@ -124,12 +163,13 @@ class Parser {
 
 /**
  * '=SUM(A1:A3)+B2*2' 형태의 아주 기본적인 수식만 지원합니다.
- * 지원 함수: SUM, AVERAGE, MAX, MIN / 연산자: + - * / ()
+ * 지원 함수: SUM, AVERAGE, MAX, MIN, COUNT, ROUND, IF / 연산자: + - * / ( ) > < >= <= = <>
+ * 비교식은 참이면 1, 거짓이면 0을 반환합니다 (예: =IF(A1>10,1,0), =A1>10 도 그대로 최상위 수식으로 가능).
  */
 export function evaluateFormula(formula: string, getValue: GetValue): number {
   const expr = formula.startsWith('=') ? formula.slice(1) : formula;
   const tokens = tokenize(expr);
   if (tokens.length === 0) return 0;
   const parser = new Parser(tokens, getValue);
-  return parser.parseExpression();
+  return parser.parseComparison();
 }

@@ -51,7 +51,8 @@ db.exec(`
     sheet_id TEXT NOT NULL,
     name TEXT NOT NULL,
     rows INTEGER NOT NULL,
-    cols INTEGER NOT NULL
+    cols INTEGER NOT NULL,
+    order_num INTEGER NOT NULL DEFAULT 0
   );
   CREATE TABLE IF NOT EXISTS cells (
     tab_id TEXT NOT NULL,
@@ -84,6 +85,21 @@ try {
   // 이미 컬럼이 있는 경우
 }
 
+// tabs에 order_num 컬럼을 나중에 추가했습니다. 기존 탭들은 sheet별로 rowid(생성 순서) 기준으로 순번을 매겨줍니다.
+if (!columnExists('tabs', 'order_num')) {
+  db.exec('ALTER TABLE tabs ADD COLUMN order_num INTEGER NOT NULL DEFAULT 0');
+  const rows = db
+    .prepare('SELECT rowid as rid, id, sheet_id FROM tabs ORDER BY sheet_id ASC, rid ASC')
+    .all() as unknown as { rid: number; id: string; sheet_id: string }[];
+  const counters: Record<string, number> = {};
+  const updateOrder = db.prepare('UPDATE tabs SET order_num = ? WHERE id = ?');
+  rows.forEach((r) => {
+    const next = counters[r.sheet_id] ?? 0;
+    updateOrder.run(next, r.id);
+    counters[r.sheet_id] = next + 1;
+  });
+}
+
 interface SheetRow {
   id: string;
   name: string;
@@ -95,6 +111,7 @@ interface TabRow {
   name: string;
   rows: number;
   cols: number;
+  order_num: number;
 }
 interface CellRow {
   row: number;
@@ -110,7 +127,30 @@ const toTab = (row: TabRow): Tab => ({
   name: row.name,
   rows: row.rows,
   cols: row.cols,
+  order: row.order_num,
 });
+
+// 행/열 삭제 직전의 탭 상태를 한 번만 기억해뒀다가 "실행취소"로 되돌릴 수 있게 합니다.
+// 서버 메모리에만 있어서 재시작하면 사라지고, 탭당 가장 최근 삭제 1건만 보관합니다.
+interface TabSnapshot {
+  rows: number;
+  cols: number;
+  cells: CellRow[];
+  columnFormats: { col: number; format: ColumnFormat; width: number | null }[];
+  merges: { anchor_row: number; anchor_col: number; row_span: number; col_span: number }[];
+}
+const lastDeleteSnapshots = new Map<string, TabSnapshot>();
+
+function snapshotTab(tabId: string, tab: Tab): TabSnapshot {
+  const cells = db.prepare('SELECT row, col, value, formula FROM cells WHERE tab_id = ?').all(tabId) as unknown as CellRow[];
+  const columnFormats = db
+    .prepare('SELECT col, format, width FROM column_formats WHERE tab_id = ?')
+    .all(tabId) as unknown as { col: number; format: ColumnFormat; width: number | null }[];
+  const merges = db
+    .prepare('SELECT anchor_row, anchor_col, row_span, col_span FROM merges WHERE tab_id = ?')
+    .all(tabId) as unknown as { anchor_row: number; anchor_col: number; row_span: number; col_span: number }[];
+  return { rows: tab.rows, cols: tab.cols, cells, columnFormats, merges };
+}
 
 export const store = {
   listSheets(): Sheet[] {
@@ -123,6 +163,18 @@ export const store = {
     const id = randomUUID();
     db.prepare('INSERT INTO sheets (id, name, order_num) VALUES (?, ?, ?)').run(id, name, c);
     return { id, name, order: c };
+  },
+
+  reorderSheets(orderedIds: string[]) {
+    const update = db.prepare('UPDATE sheets SET order_num = ? WHERE id = ?');
+    db.exec('BEGIN');
+    try {
+      orderedIds.forEach((id, i) => update.run(i, id));
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
   },
 
   renameSheet(sheetId: string, name: string): Sheet | undefined {
@@ -141,26 +193,42 @@ export const store = {
 
   listTabs(sheetId: string): Tab[] {
     const rows = db
-      .prepare('SELECT id, sheet_id, name, rows, cols FROM tabs WHERE sheet_id = ?')
+      .prepare('SELECT id, sheet_id, name, rows, cols, order_num FROM tabs WHERE sheet_id = ? ORDER BY order_num ASC')
       .all(sheetId) as unknown as TabRow[];
     return rows.map(toTab);
   },
 
   createTab(sheetId: string, name: string, rows = 15, cols = 5): Tab {
+    const { c } = db.prepare('SELECT COUNT(*) as c FROM tabs WHERE sheet_id = ?').get(sheetId) as unknown as {
+      c: number;
+    };
     const id = randomUUID();
-    db.prepare('INSERT INTO tabs (id, sheet_id, name, rows, cols) VALUES (?, ?, ?, ?, ?)').run(
+    db.prepare('INSERT INTO tabs (id, sheet_id, name, rows, cols, order_num) VALUES (?, ?, ?, ?, ?, ?)').run(
       id,
       sheetId,
       name,
       rows,
-      cols
+      cols,
+      c
     );
-    return { id, sheetId, name, rows, cols };
+    return { id, sheetId, name, rows, cols, order: c };
+  },
+
+  reorderTabs(sheetId: string, orderedIds: string[]) {
+    const update = db.prepare('UPDATE tabs SET order_num = ? WHERE id = ? AND sheet_id = ?');
+    db.exec('BEGIN');
+    try {
+      orderedIds.forEach((id, i) => update.run(i, id, sheetId));
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
   },
 
   getTab(tabId: string): Tab | undefined {
     const row = db
-      .prepare('SELECT id, sheet_id, name, rows, cols FROM tabs WHERE id = ?')
+      .prepare('SELECT id, sheet_id, name, rows, cols, order_num FROM tabs WHERE id = ?')
       .get(tabId) as unknown as TabRow | undefined;
     return row ? toTab(row) : undefined;
   },
@@ -266,6 +334,153 @@ export const store = {
     return store.getTab(tabId);
   },
 
+  // index번째 행을 지웁니다. insertRow의 반대 방향으로 셀/병합/수식을 조정합니다.
+  // 지워지는 행을 정확히 가리키던 수식은 되돌릴 방법이 없어서, 그 자리로 새로 밀려온 행을 가리키게 둡니다.
+  deleteRow(tabId: string, index: number): Tab | undefined {
+    const tab = store.getTab(tabId);
+    if (!tab) return undefined;
+
+    lastDeleteSnapshots.set(tabId, snapshotTab(tabId, tab));
+
+    db.exec('BEGIN');
+    try {
+      db.prepare('DELETE FROM cells WHERE tab_id = ? AND row = ?').run(tabId, index);
+
+      const shifted = db
+        .prepare('SELECT row, col, value, formula FROM cells WHERE tab_id = ? AND row > ?')
+        .all(tabId, index) as unknown as CellRow[];
+      db.prepare('DELETE FROM cells WHERE tab_id = ? AND row > ?').run(tabId, index);
+      const insertCell = db.prepare('INSERT INTO cells (tab_id, row, col, value, formula) VALUES (?, ?, ?, ?, ?)');
+      shifted.forEach((c) => insertCell.run(tabId, c.row - 1, c.col, c.value, c.formula));
+
+      const formulaCells = db
+        .prepare('SELECT row, col, formula FROM cells WHERE tab_id = ? AND formula IS NOT NULL')
+        .all(tabId) as unknown as { row: number; col: number; formula: string }[];
+      const updateFormula = db.prepare('UPDATE cells SET formula = ? WHERE tab_id = ? AND row = ? AND col = ?');
+      formulaCells.forEach((c) => {
+        const next = shiftFormulaRefs(c.formula, 'row', index, 'delete');
+        if (next !== c.formula) updateFormula.run(next, tabId, c.row, c.col);
+      });
+
+      const merges = store.getMerges(tabId);
+      db.prepare('DELETE FROM merges WHERE tab_id = ?').run(tabId);
+      const insertMerge = db.prepare(
+        'INSERT INTO merges (tab_id, anchor_row, anchor_col, row_span, col_span) VALUES (?, ?, ?, ?, ?)'
+      );
+      merges.forEach((m) => {
+        let { anchorRow, rowSpan } = m;
+        if (index < anchorRow) anchorRow -= 1;
+        else if (index < anchorRow + rowSpan) rowSpan -= 1;
+        if (rowSpan >= 1) insertMerge.run(tabId, anchorRow, m.anchorCol, rowSpan, m.colSpan);
+      });
+
+      db.prepare('UPDATE tabs SET rows = rows - 1 WHERE id = ?').run(tabId);
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+
+    return store.getTab(tabId);
+  },
+
+  // index번째 열을 지웁니다. insertColumn의 반대 방향으로 셀/열포맷/병합/수식을 조정합니다.
+  deleteColumn(tabId: string, index: number): Tab | undefined {
+    const tab = store.getTab(tabId);
+    if (!tab) return undefined;
+
+    lastDeleteSnapshots.set(tabId, snapshotTab(tabId, tab));
+
+    db.exec('BEGIN');
+    try {
+      db.prepare('DELETE FROM cells WHERE tab_id = ? AND col = ?').run(tabId, index);
+
+      const shiftedCells = db
+        .prepare('SELECT row, col, value, formula FROM cells WHERE tab_id = ? AND col > ?')
+        .all(tabId, index) as unknown as CellRow[];
+      db.prepare('DELETE FROM cells WHERE tab_id = ? AND col > ?').run(tabId, index);
+      const insertCell = db.prepare('INSERT INTO cells (tab_id, row, col, value, formula) VALUES (?, ?, ?, ?, ?)');
+      shiftedCells.forEach((c) => insertCell.run(tabId, c.row, c.col - 1, c.value, c.formula));
+
+      const formulaCells = db
+        .prepare('SELECT row, col, formula FROM cells WHERE tab_id = ? AND formula IS NOT NULL')
+        .all(tabId) as unknown as { row: number; col: number; formula: string }[];
+      const updateFormula = db.prepare('UPDATE cells SET formula = ? WHERE tab_id = ? AND row = ? AND col = ?');
+      formulaCells.forEach((c) => {
+        const next = shiftFormulaRefs(c.formula, 'col', index, 'delete');
+        if (next !== c.formula) updateFormula.run(next, tabId, c.row, c.col);
+      });
+
+      db.prepare('DELETE FROM column_formats WHERE tab_id = ? AND col = ?').run(tabId, index);
+      const shiftedFormats = db
+        .prepare('SELECT col, format, width FROM column_formats WHERE tab_id = ? AND col > ?')
+        .all(tabId, index) as unknown as { col: number; format: ColumnFormat; width: number | null }[];
+      db.prepare('DELETE FROM column_formats WHERE tab_id = ? AND col > ?').run(tabId, index);
+      const insertFormat = db.prepare(
+        'INSERT INTO column_formats (tab_id, col, format, width) VALUES (?, ?, ?, ?)'
+      );
+      shiftedFormats.forEach((f) => insertFormat.run(tabId, f.col - 1, f.format, f.width));
+
+      const merges = store.getMerges(tabId);
+      db.prepare('DELETE FROM merges WHERE tab_id = ?').run(tabId);
+      const insertMerge = db.prepare(
+        'INSERT INTO merges (tab_id, anchor_row, anchor_col, row_span, col_span) VALUES (?, ?, ?, ?, ?)'
+      );
+      merges.forEach((m) => {
+        let { anchorCol, colSpan } = m;
+        if (index < anchorCol) anchorCol -= 1;
+        else if (index < anchorCol + colSpan) colSpan -= 1;
+        if (colSpan >= 1) insertMerge.run(tabId, m.anchorRow, anchorCol, m.rowSpan, colSpan);
+      });
+
+      db.prepare('UPDATE tabs SET cols = cols - 1 WHERE id = ?').run(tabId);
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+
+    return store.getTab(tabId);
+  },
+
+  // deleteRow/deleteColumn 직전 상태로 되돌립니다. 한 번 쓰면 사라지고, 그 뒤에 다른 편집을 했더라도
+  // 전부 삭제 시점 상태로 덮어써버리니 사용 범위는 "방금 지운 행/열 되돌리기" 정도로 좁게 씁니다.
+  undoLastDelete(tabId: string): Tab | undefined {
+    const snapshot = lastDeleteSnapshots.get(tabId);
+    if (!snapshot) return undefined;
+    lastDeleteSnapshots.delete(tabId);
+
+    db.exec('BEGIN');
+    try {
+      db.prepare('DELETE FROM cells WHERE tab_id = ?').run(tabId);
+      db.prepare('DELETE FROM column_formats WHERE tab_id = ?').run(tabId);
+      db.prepare('DELETE FROM merges WHERE tab_id = ?').run(tabId);
+
+      const insertCell = db.prepare('INSERT INTO cells (tab_id, row, col, value, formula) VALUES (?, ?, ?, ?, ?)');
+      snapshot.cells.forEach((c) => insertCell.run(tabId, c.row, c.col, c.value, c.formula));
+
+      const insertFormat = db.prepare(
+        'INSERT INTO column_formats (tab_id, col, format, width) VALUES (?, ?, ?, ?)'
+      );
+      snapshot.columnFormats.forEach((f) => insertFormat.run(tabId, f.col, f.format, f.width));
+
+      const insertMerge = db.prepare(
+        'INSERT INTO merges (tab_id, anchor_row, anchor_col, row_span, col_span) VALUES (?, ?, ?, ?, ?)'
+      );
+      snapshot.merges.forEach((m) =>
+        insertMerge.run(tabId, m.anchor_row, m.anchor_col, m.row_span, m.col_span)
+      );
+
+      db.prepare('UPDATE tabs SET rows = ?, cols = ? WHERE id = ?').run(snapshot.rows, snapshot.cols, tabId);
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+
+    return store.getTab(tabId);
+  },
+
   renameTab(tabId: string, name: string): Tab | undefined {
     const existing = store.getTab(tabId);
     if (!existing) return undefined;
@@ -278,6 +493,7 @@ export const store = {
     db.prepare('DELETE FROM column_formats WHERE tab_id = ?').run(tabId);
     db.prepare('DELETE FROM merges WHERE tab_id = ?').run(tabId);
     db.prepare('DELETE FROM tabs WHERE id = ?').run(tabId);
+    lastDeleteSnapshots.delete(tabId);
   },
 
   getCells(tabId: string): Record<string, CellData> {

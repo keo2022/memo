@@ -34,6 +34,10 @@ export const api = {
     return request(`/api/sheets/${sheetId}`, { method: 'DELETE' });
   },
 
+  reorderSheets(orderedIds: string[]): Promise<Sheet[]> {
+    return request('/api/sheets/reorder', { method: 'PUT', body: JSON.stringify({ orderedIds }) });
+  },
+
   getTabs(sheetId: string): Promise<Tab[]> {
     return request(`/api/sheets/${sheetId}/tabs`);
   },
@@ -43,6 +47,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ name, rows, cols }),
     });
+  },
+
+  reorderTabs(sheetId: string, orderedIds: string[]): Promise<Tab[]> {
+    return request(`/api/sheets/${sheetId}/tabs/reorder`, { method: 'PUT', body: JSON.stringify({ orderedIds }) });
   },
 
   getTab(tabId: string): Promise<TabDetail> {
@@ -63,6 +71,18 @@ export const api = {
 
   insertColumn(tabId: string, index: number): Promise<Tab> {
     return request(`/api/tabs/${tabId}/columns`, { method: 'POST', body: JSON.stringify({ index }) });
+  },
+
+  deleteRow(tabId: string, index: number): Promise<Tab> {
+    return request(`/api/tabs/${tabId}/rows/${index}`, { method: 'DELETE' });
+  },
+
+  deleteColumn(tabId: string, index: number): Promise<Tab> {
+    return request(`/api/tabs/${tabId}/columns/${index}`, { method: 'DELETE' });
+  },
+
+  undoLastDelete(tabId: string): Promise<Tab> {
+    return request(`/api/tabs/${tabId}/undo-delete`, { method: 'POST' });
   },
 
   updateCell(tabId: string, row: number, col: number, value: string, formula?: string): Promise<CellInfo> {

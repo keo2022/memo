@@ -1,5 +1,6 @@
 import React, { useCallback, useState } from 'react';
-import { View, Text, FlatList, TouchableOpacity, StyleSheet, Alert } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Alert } from 'react-native';
+import DraggableFlatList, { RenderItemParams, ScaleDecorator } from 'react-native-draggable-flatlist';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -17,6 +18,7 @@ export default function SheetListScreen({ navigation }: Props) {
   const [loading, setLoading] = useState(false);
   const [actionTarget, setActionTarget] = useState<Sheet | null>(null);
   const [addModalVisible, setAddModalVisible] = useState(false);
+  const [listKey, setListKey] = useState(0);
 
   const loadSheets = useCallback(async () => {
     try {
@@ -44,36 +46,59 @@ export default function SheetListScreen({ navigation }: Props) {
     }
   };
 
+  const handleReorder = async (reordered: Sheet[]) => {
+    setSheets(reordered);
+    // 드래그 후 리스트를 강제로 다시 마운트해서, 내부 위치 캐시가 꼬여 생기는 빈 칸 현상을 막습니다.
+    setListKey((k) => k + 1);
+    try {
+      await api.reorderSheets(reordered.map((s) => s.id));
+    } catch (e) {
+      Alert.alert('순서 변경 실패', String(e));
+      loadSheets();
+    }
+  };
+
+  const renderItem = ({ item, drag, isActive }: RenderItemParams<Sheet>) => (
+    <ScaleDecorator>
+      <TouchableOpacity
+        style={[styles.sheetItem, isActive && styles.sheetItemActive]}
+        activeOpacity={0.7}
+        onPress={() => navigation.navigate('TabDetail', { sheetId: item.id, sheetName: item.name })}
+        onLongPress={drag}
+        disabled={isActive}
+      >
+        <View style={styles.sheetIconWrap}>
+          <Ionicons name="folder" size={20} color={colors.primary} />
+        </View>
+        <Text style={styles.sheetItemText} numberOfLines={1}>
+          {item.name}
+        </Text>
+        <Ionicons name="reorder-three-outline" size={20} color={colors.textMuted} />
+        <TouchableOpacity onPress={() => setActionTarget(item)} hitSlop={8} style={styles.itemMenuButton}>
+          <Ionicons name="ellipsis-vertical" size={18} color={colors.textMuted} />
+        </TouchableOpacity>
+      </TouchableOpacity>
+    </ScaleDecorator>
+  );
+
   return (
     <View style={styles.container}>
-      <FlatList
+      <DraggableFlatList
+        key={listKey}
         data={sheets}
         keyExtractor={(item) => item.id}
         refreshing={loading}
         onRefresh={loadSheets}
         contentContainerStyle={sheets.length === 0 ? styles.emptyContainer : styles.listContent}
+        onDragEnd={({ data }) => handleReorder(data)}
+        removeClippedSubviews={false}
         ListEmptyComponent={
           <View style={styles.empty}>
             <Ionicons name="file-tray-outline" size={40} color={colors.textMuted} />
             <Text style={styles.emptyText}>시트가 없습니다{'\n'}아래 + 버튼으로 새 시트를 추가해보세요</Text>
           </View>
         }
-        renderItem={({ item }) => (
-          <TouchableOpacity
-            style={styles.sheetItem}
-            activeOpacity={0.7}
-            onPress={() => navigation.navigate('TabDetail', { sheetId: item.id, sheetName: item.name })}
-            onLongPress={() => setActionTarget(item)}
-          >
-            <View style={styles.sheetIconWrap}>
-              <Ionicons name="folder" size={20} color={colors.primary} />
-            </View>
-            <Text style={styles.sheetItemText} numberOfLines={1}>
-              {item.name}
-            </Text>
-            <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
-          </TouchableOpacity>
-        )}
+        renderItem={renderItem}
       />
 
       <TouchableOpacity style={styles.fab} activeOpacity={0.85} onPress={() => setAddModalVisible(true)}>
@@ -140,8 +165,10 @@ const styles = StyleSheet.create({
     borderRadius: radius.md,
     padding: spacing.md,
     marginBottom: spacing.sm,
+    gap: spacing.sm,
     ...shadow.card,
   },
+  sheetItemActive: { backgroundColor: colors.primarySoft, ...shadow.floating },
   sheetIconWrap: {
     width: 36,
     height: 36,
@@ -152,6 +179,7 @@ const styles = StyleSheet.create({
     marginRight: spacing.md,
   },
   sheetItemText: { flex: 1, fontSize: 16, fontWeight: '600', color: colors.textPrimary },
+  itemMenuButton: { padding: 4 },
   empty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: spacing.md },
   emptyText: { textAlign: 'center', color: colors.textMuted, fontSize: 14, lineHeight: 20 },
 });

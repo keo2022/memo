@@ -10,6 +10,7 @@ export interface Tab {
   name: string;
   rows: number;
   cols: number;
+  order: number;
 }
 
 export interface CellInfo {
