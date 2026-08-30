@@ -1,7 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { Modal, View, Text, TextInput, TouchableOpacity, StyleSheet } from 'react-native';
+import { Modal, View, Text, TextInput, TouchableOpacity, StyleSheet, KeyboardAvoidingView, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, radius, spacing, shadow } from '../theme';
+import Animated, { BounceIn } from 'react-native-reanimated';
+import { colors, radius, spacing, shadow, fonts, type } from '../theme';
+import RingMascot, { MascotMood } from './mascot/RingMascot';
+import Squishy from './Squishy';
+import { useReduceMotion } from '../hooks/useReduceMotion';
 
 type Mode = 'menu' | 'rename' | 'confirmDelete';
 
@@ -15,6 +19,8 @@ interface Props {
   onDelete: () => Promise<void> | void;
 }
 
+const MOOD: Record<Mode, MascotMood> = { menu: 'happy', rename: 'excited', confirmDelete: 'sleepy' };
+
 export default function ItemActionModal({
   visible,
   itemName,
@@ -24,6 +30,7 @@ export default function ItemActionModal({
   onRename,
   onDelete,
 }: Props) {
+  const reduceMotion = useReduceMotion();
   const [mode, setMode] = useState<Mode>('menu');
   const [nameDraft, setNameDraft] = useState(itemName);
   const [busy, setBusy] = useState(false);
@@ -66,44 +73,38 @@ export default function ItemActionModal({
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={handleClose}>
-      <View style={styles.backdrop}>
-        <View style={styles.card}>
+      <KeyboardAvoidingView style={styles.backdrop} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <Animated.View key={mode} entering={reduceMotion ? undefined : BounceIn} style={styles.card}>
+          <View style={styles.mascotWrap}>
+            <RingMascot size={62} mood={MOOD[mode]} animated />
+          </View>
+          <TouchableOpacity onPress={handleClose} hitSlop={8} style={styles.close}>
+            <Ionicons name="close" size={22} color={colors.textMuted} />
+          </TouchableOpacity>
+
           {mode === 'menu' && (
             <>
-              <View style={styles.header}>
-                <Text style={styles.title} numberOfLines={1}>
-                  {itemName}
-                </Text>
-                <TouchableOpacity onPress={handleClose} hitSlop={8}>
-                  <Ionicons name="close" size={22} color={colors.textMuted} />
-                </TouchableOpacity>
-              </View>
-
-              <TouchableOpacity style={styles.option} onPress={() => setMode('rename')}>
+              <Text style={styles.title} numberOfLines={1}>
+                {itemName}
+              </Text>
+              <Squishy style={styles.option} onPress={() => setMode('rename')}>
                 <View style={styles.optionIconWrap}>
                   <Ionicons name="create-outline" size={18} color={colors.primaryDark} />
                 </View>
-                <Text style={styles.optionLabel}>이름 변경</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity style={[styles.option, styles.optionLast]} onPress={() => setMode('confirmDelete')}>
+                <Text style={styles.optionLabel}>이름 바꾸기</Text>
+              </Squishy>
+              <Squishy style={[styles.option, styles.optionLast]} onPress={() => setMode('confirmDelete')}>
                 <View style={[styles.optionIconWrap, styles.optionIconWrapDanger]}>
                   <Ionicons name="trash-outline" size={18} color={colors.danger} />
                 </View>
-                <Text style={[styles.optionLabel, styles.optionLabelDanger]}>삭제</Text>
-              </TouchableOpacity>
+                <Text style={[styles.optionLabel, styles.optionLabelDanger]}>삭제하기</Text>
+              </Squishy>
             </>
           )}
 
           {mode === 'rename' && (
             <>
-              <View style={styles.header}>
-                <Text style={styles.title}>이름 변경</Text>
-                <TouchableOpacity onPress={handleClose} hitSlop={8}>
-                  <Ionicons name="close" size={22} color={colors.textMuted} />
-                </TouchableOpacity>
-              </View>
-
+              <Text style={styles.title}>새 이름은?</Text>
               <TextInput
                 style={styles.input}
                 value={nameDraft}
@@ -112,111 +113,102 @@ export default function ItemActionModal({
                 autoFocus
                 onSubmitEditing={handleRename}
               />
-
               <View style={styles.actions}>
-                <TouchableOpacity
-                  style={[styles.button, styles.buttonCancel]}
-                  onPress={() => setMode('menu')}
-                  disabled={busy}
-                >
+                <Squishy style={[styles.button, styles.buttonCancel]} onPress={() => setMode('menu')} disabled={busy}>
                   <Text style={styles.buttonCancelText}>뒤로</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
+                </Squishy>
+                <Squishy
                   style={[styles.button, styles.buttonPrimary, !nameDraft.trim() && styles.buttonDisabled]}
                   onPress={handleRename}
                   disabled={busy || !nameDraft.trim()}
                 >
                   <Text style={styles.buttonPrimaryText}>저장</Text>
-                </TouchableOpacity>
+                </Squishy>
               </View>
             </>
           )}
 
           {mode === 'confirmDelete' && (
             <>
-              <View style={styles.header}>
-                <Text style={styles.title}>{itemTypeLabel} 삭제</Text>
-                <TouchableOpacity onPress={handleClose} hitSlop={8}>
-                  <Ionicons name="close" size={22} color={colors.textMuted} />
-                </TouchableOpacity>
-              </View>
-
+              <Text style={styles.title}>{itemTypeLabel}, 삭제할까요?</Text>
               <Text style={styles.warning}>{deleteWarning}</Text>
-
               <View style={styles.actions}>
-                <TouchableOpacity
-                  style={[styles.button, styles.buttonCancel]}
-                  onPress={() => setMode('menu')}
-                  disabled={busy}
-                >
-                  <Text style={styles.buttonCancelText}>취소</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={[styles.button, styles.buttonDanger]} onPress={handleDelete} disabled={busy}>
+                <Squishy style={[styles.button, styles.buttonCancel]} onPress={() => setMode('menu')} disabled={busy}>
+                  <Text style={styles.buttonCancelText}>아니요</Text>
+                </Squishy>
+                <Squishy style={[styles.button, styles.buttonDanger]} onPress={handleDelete} disabled={busy}>
                   <Text style={styles.buttonPrimaryText}>삭제</Text>
-                </TouchableOpacity>
+                </Squishy>
               </View>
             </>
           )}
-        </View>
-      </View>
+        </Animated.View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  backdrop: { flex: 1, backgroundColor: 'rgba(18,33,23,0.45)', alignItems: 'center', justifyContent: 'center' },
+  backdrop: { flex: 1, backgroundColor: 'rgba(58,46,48,0.4)', alignItems: 'center', justifyContent: 'center' },
   card: {
-    width: '85%',
+    width: '86%',
     backgroundColor: colors.surface,
-    borderRadius: radius.lg,
-    padding: spacing.lg,
+    borderRadius: radius.xl,
+    paddingTop: spacing.xl + spacing.md,
+    paddingBottom: spacing.lg,
+    paddingHorizontal: spacing.lg,
+    marginTop: 24,
     ...shadow.floating,
   },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: spacing.md,
-  },
-  title: { fontSize: 16, fontWeight: '700', color: colors.textPrimary, flex: 1, marginRight: spacing.sm },
+  mascotWrap: { position: 'absolute', top: -30, alignSelf: 'center' },
+  close: { position: 'absolute', top: spacing.md, right: spacing.md, padding: 2 },
+  title: { ...type.title, fontSize: 20, textAlign: 'center', marginBottom: spacing.md },
   option: {
     flexDirection: 'row',
     alignItems: 'center',
     padding: spacing.md,
-    borderRadius: radius.sm,
+    borderRadius: radius.md,
+    backgroundColor: colors.background,
     borderWidth: 1,
     borderColor: colors.border,
     marginBottom: spacing.sm,
   },
   optionLast: { marginBottom: 0 },
   optionIconWrap: {
-    width: 32,
-    height: 32,
-    borderRadius: radius.sm,
+    width: 36,
+    height: 36,
+    borderRadius: radius.pill,
     backgroundColor: colors.primarySoft,
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: spacing.md,
   },
-  optionIconWrapDanger: { backgroundColor: '#FCE7E7' },
-  optionLabel: { fontSize: 14, fontWeight: '700', color: colors.textPrimary },
+  optionIconWrapDanger: { backgroundColor: colors.dangerSoft },
+  optionLabel: { fontSize: 14, fontFamily: fonts.bold, color: colors.textPrimary },
   optionLabelDanger: { color: colors.danger },
   input: {
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.sm,
-    padding: 12,
+    borderWidth: 1.5,
+    borderColor: colors.primarySoftBorder,
+    borderRadius: radius.md,
+    padding: 13,
     fontSize: 15,
     color: colors.textPrimary,
     backgroundColor: colors.background,
+    fontFamily: fonts.medium,
   },
-  warning: { fontSize: 14, color: colors.textSecondary, lineHeight: 20 },
-  actions: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: spacing.lg },
-  button: { paddingHorizontal: spacing.lg, paddingVertical: 10, borderRadius: radius.sm, marginLeft: spacing.sm },
+  warning: { fontSize: 14, color: colors.textSecondary, lineHeight: 20, fontFamily: fonts.regular, textAlign: 'center' },
+  actions: { flexDirection: 'row', justifyContent: 'center', marginTop: spacing.lg, gap: spacing.sm },
+  button: {
+    paddingHorizontal: spacing.xl,
+    paddingVertical: 12,
+    borderRadius: radius.pill,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   buttonCancel: { backgroundColor: colors.background, borderWidth: 1, borderColor: colors.border },
-  buttonCancelText: { color: colors.textSecondary, fontWeight: '600' },
-  buttonPrimary: { backgroundColor: colors.primary },
-  buttonPrimaryText: { color: colors.white, fontWeight: '700' },
-  buttonDanger: { backgroundColor: colors.danger },
+  buttonCancelText: { color: colors.textSecondary, fontFamily: fonts.semibold },
+  buttonPrimary: { backgroundColor: colors.primary, ...shadow.glow },
+  buttonPrimaryText: { color: colors.white, fontFamily: fonts.bold },
+  buttonDanger: { backgroundColor: colors.danger, ...shadow.glow },
   buttonDisabled: { opacity: 0.5 },
 });

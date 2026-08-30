@@ -13,14 +13,18 @@ import {
   Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import Animated, { BounceIn, ZoomIn, useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
 import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/RootNavigator';
 import { api } from '../db/repository';
 import type { CellInfo, ColumnFormat, Merge, Tab, TabDetail } from '../types';
-import { colors, radius, spacing, shadow } from '../theme';
+import { colors, radius, spacing, shadow, fonts, motion, type } from '../theme';
 import NamePromptModal from '../components/NamePromptModal';
 import Snackbar from '../components/Snackbar';
+import HeartBurst from '../components/HeartBurst';
+import EmptyIllustration from '../components/illustrations/EmptyIllustration';
+import { useReduceMotion } from '../hooks/useReduceMotion';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'TabDetail'>;
 
@@ -35,16 +39,10 @@ const WIDTH_STEP = 12;
 const CHAR_WIDTH_ESTIMATE = 9;
 const CELL_HORIZONTAL_PADDING = 20;
 
-const FORMAT_OPTIONS: { format: ColumnFormat; label: string; description: string; icon: keyof typeof Ionicons.glyphMap }[] = [
-  { format: 'text', label: '기본', description: '자유롭게 값이나 수식을 입력', icon: 'text-outline' },
-  { format: 'checkbox', label: '체크(O/X)', description: '탭 한 번으로 O/X 선택', icon: 'checkbox-outline' },
-  { format: 'number', label: '숫자', description: '백/천/만 단위 버튼으로 빠르게 입력', icon: 'calculator-outline' },
-];
-
-const NUMBER_UNITS: { label: string; multiplier: number }[] = [
-  { label: '백', multiplier: 100 },
-  { label: '천', multiplier: 1000 },
-  { label: '만', multiplier: 10000 },
+const FORMAT_OPTIONS: { format: ColumnFormat; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
+  { format: 'text', label: '기본', icon: 'text-outline' },
+  { format: 'checkbox', label: '체크(O/X)', icon: 'checkbox-outline' },
+  { format: 'number', label: '숫자', icon: 'calculator-outline' },
 ];
 
 function colLabel(col: number): string {
@@ -86,6 +84,24 @@ function buildMergePlan(merges: Merge[], rows: number, cols: number): CellPlan[]
   return plan;
 }
 
+function TabPill({ name, active, onPress }: { name: string; active: boolean; onPress: () => void }) {
+  const reduceMotion = useReduceMotion();
+  const scale = useSharedValue(active ? 1 : 0.96);
+  React.useEffect(() => {
+    scale.value = reduceMotion ? 1 : withSpring(active ? 1 : 0.96, motion.bouncy);
+  }, [active, reduceMotion, scale]);
+  const style = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
+  return (
+    <TouchableOpacity onPress={onPress} activeOpacity={0.8}>
+      <Animated.View style={[styles.tabPill, active && styles.tabPillActive, style]}>
+        <Text style={[styles.tabPillText, active && styles.tabPillTextActive]} numberOfLines={1}>
+          {name}
+        </Text>
+      </Animated.View>
+    </TouchableOpacity>
+  );
+}
+
 export default function TabDetailScreen({ route, navigation }: Props) {
   const { sheetId, sheetName, tabId } = route.params;
   const [tab, setTab] = useState<TabDetail | null>(null);
@@ -103,6 +119,8 @@ export default function TabDetailScreen({ route, navigation }: Props) {
   const [mergeTarget, setMergeTarget] = useState<{ row: number; col: number; rowSpan: number; colSpan: number } | null>(
     null
   );
+  const [burst, setBurst] = useState(0);
+  const reduceMotion = useReduceMotion();
 
   const loadTab = useCallback(async () => {
     try {
@@ -183,7 +201,8 @@ export default function TabDetailScreen({ route, navigation }: Props) {
     const maxLen = Array.from({ length: tab.cols }, (_, c) => colLabel(c).length);
     tab.cells.forEach((cell) => {
       const format = tab.columnFormats[cell.col] ?? 'text';
-      if (format === 'checkbox') return;
+      // 체크 열이라도 O/X·빈칸이 아닌 자유 입력값이면 너비 계산에 포함합니다.
+      if (format === 'checkbox' && (cell.value === 'O' || cell.value === 'X' || cell.value === '')) return;
       const display = cell.formula
         ? format === 'number'
           ? formatNumberDisplay(String(cell.computed))
@@ -196,7 +215,9 @@ export default function TabDetailScreen({ route, navigation }: Props) {
     return Array.from({ length: tab.cols }, (_, col) => {
       const override = tab.columnWidths[col];
       if (override != null) return override;
-      if ((tab.columnFormats[col] ?? 'text') === 'checkbox') return CHECKBOX_COL_WIDTH;
+      const isCheckbox = (tab.columnFormats[col] ?? 'text') === 'checkbox';
+      // 체크 열에 자유 입력값이 없으면 좁게, 있으면 일반 열처럼 넓힙니다.
+      if (isCheckbox && maxLen[col] <= colLabel(col).length) return CHECKBOX_COL_WIDTH;
       const estimated = maxLen[col] * CHAR_WIDTH_ESTIMATE + CELL_HORIZONTAL_PADDING;
       return Math.min(MAX_COL_WIDTH, Math.max(DEFAULT_COL_WIDTH, estimated));
     });
@@ -209,20 +230,17 @@ export default function TabDetailScreen({ route, navigation }: Props) {
     return offsets;
   }, [colWidths]);
 
-  if (loading) {
-    return (
-      <View style={styles.center}>
-        <ActivityIndicator color={colors.primary} size="large" />
-        <Text style={styles.loadingText}>불러오는 중...</Text>
-      </View>
-    );
+  // 로컬 DB라 로딩이 순식간이라, 첫 로드 전에는 별도 로딩 화면 없이 배경만 보여줍니다.
+  if (loading && !tab) {
+    return <View style={styles.container} />;
   }
 
   if (!tab) {
     return (
       <View style={styles.center}>
-        <Ionicons name="grid-outline" size={40} color={colors.textMuted} />
-        <Text style={styles.emptyText}>탭이 없습니다{'\n'}오른쪽 위 + 버튼으로 새 탭을 추가해보세요</Text>
+        <EmptyIllustration variant="grid" />
+        <Text style={styles.emptyTitle}>아직 탭이 없어요</Text>
+        <Text style={styles.emptyText}>오른쪽 위 ＋ 버튼으로 새 탭을 만들어보세요 ✨</Text>
         <NamePromptModal
           visible={addTabModalVisible}
           title="새 탭 추가"
@@ -246,6 +264,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
     setSavingCell(true);
     try {
       await api.updateCell(tab.id, selected.row, selected.col, value);
+      if (value) setBurst((b) => b + 1);
       setSelected(null);
       await loadTab();
     } catch (e) {
@@ -255,11 +274,6 @@ export default function TabDetailScreen({ route, navigation }: Props) {
     }
   };
 
-  const applyUnit = (multiplier: number) => {
-    const base = Number(draft.replace(/,/g, ''));
-    const next = (isNaN(base) ? 0 : base) * multiplier;
-    setDraft(String(next));
-  };
 
   const changeColumnFormat = async (format: ColumnFormat) => {
     if (formatPickerCol === null) return;
@@ -318,6 +332,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
     if (!mergeTarget) return;
     try {
       await api.setMerge(tab.id, mergeTarget.row, mergeTarget.col, mergeTarget.rowSpan, mergeTarget.colSpan);
+      if (mergeTarget.rowSpan > 1 || mergeTarget.colSpan > 1) setBurst((b) => b + 1);
       setMergeTarget(null);
       loadTab();
     } catch (e) {
@@ -439,6 +454,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
         isFormula ? '' : draft,
         isFormula ? draft.trim() : undefined
       );
+      if (draft.trim()) setBurst((b) => b + 1);
       setSelected(null);
       await loadTab();
     } catch (e) {
@@ -479,6 +495,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
     };
 
     if (format === 'checkbox') {
+      const isMark = rawValue === 'O' || rawValue === 'X';
       return (
         <TouchableOpacity
           key={`${row}_${col}`}
@@ -487,8 +504,19 @@ export default function TabDetailScreen({ route, navigation }: Props) {
           onPress={() => openCell(row, col)}
           onLongPress={() => openMergeModal(row, col)}
         >
-          {rawValue === 'O' && <Ionicons name="checkmark-circle" size={30} color={colors.primary} />}
-          {rawValue === 'X' && <Ionicons name="close-circle" size={30} color={colors.danger} />}
+          {isMark ? (
+            <Animated.View key={rawValue} entering={reduceMotion ? undefined : ZoomIn.springify().damping(9)}>
+              <Ionicons
+                name={rawValue === 'O' ? 'checkmark-circle' : 'close-circle'}
+                size={30}
+                color={rawValue === 'O' ? colors.primary : colors.danger}
+              />
+            </Animated.View>
+          ) : rawValue !== '' ? (
+            <Text numberOfLines={1} style={styles.cellText}>
+              {rawValue}
+            </Text>
+          ) : null}
         </TouchableOpacity>
       );
     }
@@ -524,20 +552,9 @@ export default function TabDetailScreen({ route, navigation }: Props) {
           style={styles.tabBar}
           contentContainerStyle={styles.tabBarContent}
         >
-          {siblings.map((s) => {
-            const active = s.id === tab.id;
-            return (
-              <TouchableOpacity
-                key={s.id}
-                style={[styles.tabPill, active && styles.tabPillActive]}
-                onPress={() => switchTab(s)}
-              >
-                <Text style={[styles.tabPillText, active && styles.tabPillTextActive]} numberOfLines={1}>
-                  {s.name}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
+          {siblings.map((s) => (
+            <TabPill key={s.id} name={s.name} active={s.id === tab.id} onPress={() => switchTab(s)} />
+          ))}
         </ScrollView>
       )}
       <View style={styles.gridArea}>
@@ -606,147 +623,101 @@ export default function TabDetailScreen({ route, navigation }: Props) {
               </TouchableOpacity>
             </View>
 
-            {selected && tab.columnFormats[selected.col] === 'checkbox' ? (
-              <>
-                <View style={styles.checkboxChoiceRow}>
-                  <TouchableOpacity
-                    style={[
-                      styles.checkboxChoiceButton,
-                      selected.value === 'O' && styles.checkboxChoiceButtonActive,
-                      savingCell && styles.modalButtonDisabled,
-                    ]}
-                    onPress={() => saveCheckbox('O')}
-                    disabled={savingCell}
-                  >
-                    <Ionicons
-                      name="checkmark-circle"
-                      size={26}
-                      color={selected.value === 'O' ? colors.white : colors.primary}
-                    />
-                    <Text
-                      style={[styles.checkboxChoiceLabel, selected.value === 'O' && styles.checkboxChoiceLabelActive]}
-                    >
-                      O
-                    </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[
-                      styles.checkboxChoiceButton,
-                      selected.value === 'X' && styles.checkboxChoiceButtonActiveDanger,
-                      savingCell && styles.modalButtonDisabled,
-                    ]}
-                    onPress={() => saveCheckbox('X')}
-                    disabled={savingCell}
-                  >
-                    <Ionicons
-                      name="close-circle"
-                      size={26}
-                      color={selected.value === 'X' ? colors.white : colors.danger}
-                    />
-                    <Text
-                      style={[styles.checkboxChoiceLabel, selected.value === 'X' && styles.checkboxChoiceLabelActive]}
-                    >
-                      X
-                    </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[
-                      styles.checkboxChoiceButton,
-                      selected.value === '' && styles.checkboxChoiceButtonActiveMuted,
-                      savingCell && styles.modalButtonDisabled,
-                    ]}
-                    onPress={() => saveCheckbox('')}
-                    disabled={savingCell}
-                  >
-                    <Ionicons
-                      name="ellipse-outline"
-                      size={26}
-                      color={selected.value === '' ? colors.white : colors.textMuted}
-                    />
-                    <Text
-                      style={[styles.checkboxChoiceLabel, selected.value === '' && styles.checkboxChoiceLabelActive]}
-                    >
-                      해제
-                    </Text>
-                  </TouchableOpacity>
-                </View>
+            {(() => {
+              const isCheckboxCol = !!selected && tab.columnFormats[selected.col] === 'checkbox';
+              const isNumberCol = !!selected && tab.columnFormats[selected.col] === 'number';
+              const isFormulaDraft = draft.trim().startsWith('=');
+              return (
+                <>
+                  <TextInput
+                    style={styles.modalInput}
+                    value={draft}
+                    onChangeText={setDraft}
+                    autoFocus
+                    multiline
+                    textAlignVertical="top"
+                    editable={!savingCell}
+                    keyboardType={
+                      isNumberCol && !isFormulaDraft ? 'numbers-and-punctuation' : 'default'
+                    }
+                  />
 
-                <View style={styles.modalActions}>
-                  <TouchableOpacity
-                    onPress={() => setSelected(null)}
-                    style={[styles.modalButton, styles.modalCancel]}
-                    disabled={savingCell}
-                  >
-                    <Text style={styles.modalCancelText}>취소</Text>
-                  </TouchableOpacity>
-                </View>
-              </>
-            ) : (
-              <>
-                <TextInput
-                  style={styles.modalInput}
-                  value={draft}
-                  onChangeText={setDraft}
-                  placeholderTextColor={colors.textMuted}
-                  autoFocus
-                  multiline
-                  textAlignVertical="top"
-                  editable={!savingCell}
-                  keyboardType={
-                    selected && tab.columnFormats[selected.col] === 'number' && !selected.formula
-                      ? 'numeric'
-                      : 'default'
-                  }
-                />
+                  {isNumberCol && !isFormulaDraft && (
+                    <View style={styles.unitRow}>
+                      {['00', '000'].map((z) => (
+                        <TouchableOpacity
+                          key={z}
+                          style={styles.unitButton}
+                          onPress={() => setDraft((d) => (d.trim() ? d + z : d))}
+                          disabled={savingCell}
+                        >
+                          <Text style={styles.unitButtonText}>{z}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  )}
 
-                {selected && tab.columnFormats[selected.col] === 'number' && !draft.trim().startsWith('=') && (
-                  <View style={styles.unitRow}>
-                    {NUMBER_UNITS.map((u) => (
+                  {isCheckboxCol && (
+                    <View style={styles.checkboxChoiceRow}>
                       <TouchableOpacity
-                        key={u.label}
-                        style={styles.unitButton}
-                        onPress={() => applyUnit(u.multiplier)}
+                        style={[
+                          styles.checkboxChoiceButton,
+                          draft === 'O' && styles.checkboxChoiceButtonActive,
+                          savingCell && styles.modalButtonDisabled,
+                        ]}
+                        onPress={() => saveCheckbox('O')}
                         disabled={savingCell}
                       >
-                        <Text style={styles.unitButtonText}>×{u.label}</Text>
+                        <Ionicons name="checkmark-circle" size={26} color={draft === 'O' ? colors.white : colors.primary} />
+                        <Text style={[styles.checkboxChoiceLabel, draft === 'O' && styles.checkboxChoiceLabelActive]}>O</Text>
                       </TouchableOpacity>
-                    ))}
-                  </View>
-                )}
+                      <TouchableOpacity
+                        style={[
+                          styles.checkboxChoiceButton,
+                          draft === 'X' && styles.checkboxChoiceButtonActiveDanger,
+                          savingCell && styles.modalButtonDisabled,
+                        ]}
+                        onPress={() => saveCheckbox('X')}
+                        disabled={savingCell}
+                      >
+                        <Ionicons name="close-circle" size={26} color={draft === 'X' ? colors.white : colors.danger} />
+                        <Text style={[styles.checkboxChoiceLabel, draft === 'X' && styles.checkboxChoiceLabelActive]}>X</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
 
-                <Text style={styles.modalHint}>지원 함수: SUM · AVERAGE · MAX · MIN · COUNT · ROUND · IF</Text>
-
-                <View style={styles.modalActions}>
-                  {(selected?.value !== '' || !!selected?.formula) && (
+                  <View style={styles.modalActions}>
+                    {(selected?.value !== '' || !!selected?.formula) && (
+                      <TouchableOpacity
+                        onPress={clearCell}
+                        style={[styles.modalButton, styles.modalCancel]}
+                        disabled={savingCell}
+                      >
+                        <Text style={styles.modalDangerText}>비우기</Text>
+                      </TouchableOpacity>
+                    )}
                     <TouchableOpacity
-                      onPress={clearCell}
+                      onPress={() => setSelected(null)}
                       style={[styles.modalButton, styles.modalCancel]}
                       disabled={savingCell}
                     >
-                      <Text style={styles.modalDangerText}>비우기</Text>
+                      <Text style={styles.modalCancelText}>취소</Text>
                     </TouchableOpacity>
-                  )}
-                  <TouchableOpacity
-                    onPress={() => setSelected(null)}
-                    style={[styles.modalButton, styles.modalCancel]}
-                    disabled={savingCell}
-                  >
-                    <Text style={styles.modalCancelText}>취소</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    onPress={saveCell}
-                    style={[styles.modalButton, styles.modalPrimary, savingCell && styles.modalButtonDisabled]}
-                    disabled={savingCell}
-                  >
-                    {savingCell ? (
-                      <ActivityIndicator color={colors.white} size="small" />
-                    ) : (
-                      <Text style={styles.modalPrimaryText}>저장</Text>
-                    )}
-                  </TouchableOpacity>
-                </View>
-              </>
-            )}
+                    <TouchableOpacity
+                      onPress={saveCell}
+                      style={[styles.modalButton, styles.modalPrimary, savingCell && styles.modalButtonDisabled]}
+                      disabled={savingCell}
+                    >
+                      {savingCell ? (
+                        <ActivityIndicator color={colors.white} size="small" />
+                      ) : (
+                        <Text style={styles.modalPrimaryText}>저장</Text>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                </>
+              );
+            })()}
           </View>
         </KeyboardAvoidingView>
       </Modal>
@@ -781,7 +752,6 @@ export default function TabDetailScreen({ route, navigation }: Props) {
                   </View>
                   <View style={styles.formatOptionTextWrap}>
                     <Text style={styles.formatOptionLabel}>{opt.label}</Text>
-                    <Text style={styles.formatOptionDesc}>{opt.description}</Text>
                   </View>
                   {active && <Ionicons name="checkmark" size={20} color={colors.primary} />}
                 </TouchableOpacity>
@@ -853,10 +823,6 @@ export default function TabDetailScreen({ route, navigation }: Props) {
                 </TouchableOpacity>
               </View>
             </View>
-
-            <Text style={styles.modalHint}>
-              병합되면 왼쪽 위 셀의 값만 유지되고, 셀을 다시 길게 누르면 범위를 바꾸거나 해제할 수 있어요.
-            </Text>
 
             <View style={styles.modalActions}>
               {mergeTarget && (mergeTarget.rowSpan > 1 || mergeTarget.colSpan > 1) && (
@@ -952,9 +918,9 @@ export default function TabDetailScreen({ route, navigation }: Props) {
 
             <Text style={styles.modalWarning}>
               {deleteConfirm?.axis === 'row'
-                ? `${deleteConfirm.index + 1}행을 삭제할까요? 이 행의 데이터가 사라집니다.`
+                ? `${deleteConfirm.index + 1}행을 삭제할까요?`
                 : deleteConfirm
-                  ? `${colLabel(deleteConfirm.index)}열을 삭제할까요? 이 열의 데이터가 사라집니다.`
+                  ? `${colLabel(deleteConfirm.index)}열을 삭제할까요?`
                   : ''}
             </Text>
 
@@ -981,10 +947,12 @@ export default function TabDetailScreen({ route, navigation }: Props) {
       <Snackbar
         visible={!!snackbar}
         message={snackbar?.message ?? ''}
-        actionLabel="실행취소"
+        actionLabel="되돌리기"
         onAction={handleUndoDelete}
         onDismiss={() => setSnackbar(null)}
       />
+
+      <HeartBurst trigger={burst} originY={0.4} />
     </View>
   );
 }
@@ -992,24 +960,39 @@ export default function TabDetailScreen({ route, navigation }: Props) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: spacing.md },
-  loadingText: { color: colors.textMuted, fontSize: 14 },
-  emptyText: { textAlign: 'center', color: colors.textMuted, fontSize: 14, lineHeight: 20 },
+  emptyIconWrap: {
+    width: 88,
+    height: 88,
+    borderRadius: radius.pill,
+    backgroundColor: colors.primarySoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  loadingText: { color: colors.textMuted, fontSize: 14, fontFamily: fonts.medium },
+  emptyTitle: { ...type.title, marginTop: spacing.sm },
+  emptyText: { textAlign: 'center', color: colors.textMuted, fontSize: 13, lineHeight: 19, fontFamily: fonts.medium },
   headerButtons: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginRight: spacing.xs },
-  tabBar: { flexGrow: 0, backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.border },
-  tabBarContent: { paddingHorizontal: spacing.md, paddingVertical: spacing.sm, gap: spacing.sm },
+  tabBar: { flexGrow: 0, backgroundColor: colors.background, borderBottomWidth: 1, borderBottomColor: colors.border },
+  tabBarContent: { paddingHorizontal: spacing.lg, paddingVertical: spacing.sm, gap: spacing.sm },
   tabPill: {
     paddingHorizontal: spacing.md,
     paddingVertical: 8,
     borderRadius: radius.pill,
-    backgroundColor: colors.background,
-    borderWidth: 1,
-    borderColor: colors.border,
+    backgroundColor: colors.surfaceAlt,
     marginRight: spacing.sm,
   },
-  tabPillActive: { backgroundColor: colors.primary, borderColor: colors.primary },
-  tabPillText: { fontSize: 13, fontWeight: '600', color: colors.textSecondary },
+  tabPillActive: { backgroundColor: colors.primary },
+  tabPillText: { fontSize: 13, fontFamily: fonts.bold, letterSpacing: -0.1, color: colors.textSecondary },
   tabPillTextActive: { color: colors.white },
-  gridArea: { flex: 1 },
+  gridArea: {
+    flex: 1,
+    margin: spacing.md,
+    borderRadius: radius.lg,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
   row: { flexDirection: 'row' },
   cell: {
     width: CELL_WIDTH,
@@ -1021,18 +1004,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
     backgroundColor: colors.surface,
   },
-  cellFormula: { backgroundColor: colors.primarySoft },
-  headerCell: { backgroundColor: colors.primarySoft, borderColor: colors.primarySoftBorder },
+  cellFormula: { backgroundColor: colors.accentSoft },
+  headerCell: { backgroundColor: colors.surfaceAlt, borderColor: colors.borderStrong },
   rowHeaderCell: { width: ROW_HEADER_WIDTH },
-  headerText: { fontWeight: '700', color: colors.primaryDark, fontSize: 13 },
+  headerText: { fontFamily: fonts.bold, color: colors.textSecondary, fontSize: 13 },
   headerFormatIcon: { marginTop: 2 },
-  cellText: { fontSize: 14, color: colors.textPrimary },
-  cellTextFormula: { color: colors.primaryDark, fontWeight: '700' },
-  modalBackdrop: { flex: 1, backgroundColor: 'rgba(18,33,23,0.45)', alignItems: 'center', justifyContent: 'center' },
+  cellText: { fontSize: 14, color: colors.textPrimary, fontFamily: fonts.regular },
+  cellTextFormula: { color: colors.accentDark, fontFamily: fonts.bold },
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(58,46,48,0.4)', alignItems: 'center', justifyContent: 'center' },
   modalCard: {
     width: '85%',
     backgroundColor: colors.surface,
-    borderRadius: radius.lg,
+    borderRadius: radius.xl,
     padding: spacing.lg,
     ...shadow.floating,
   },
@@ -1048,47 +1031,48 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingVertical: 4,
   },
-  modalBadgeText: { color: colors.primaryDark, fontWeight: '700', fontSize: 13 },
+  modalBadgeText: { color: colors.primaryDark, fontFamily: fonts.bold, fontSize: 13 },
   modalInput: {
     borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: radius.sm,
+    borderRadius: radius.md,
     padding: 12,
     fontSize: 15,
     color: colors.textPrimary,
     backgroundColor: colors.background,
     minHeight: 44,
     maxHeight: 160,
+    fontFamily: fonts.medium,
   },
-  modalHint: { color: colors.textMuted, fontSize: 12, marginTop: spacing.sm, marginBottom: spacing.md },
+  modalHint: { color: colors.textMuted, fontSize: 12, marginTop: spacing.sm, marginBottom: spacing.md, fontFamily: fonts.regular },
   modalActions: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: spacing.lg },
-  modalButton: { paddingHorizontal: spacing.lg, paddingVertical: 10, borderRadius: radius.sm, marginLeft: spacing.sm },
+  modalButton: { paddingHorizontal: spacing.lg, paddingVertical: 11, borderRadius: radius.pill, marginLeft: spacing.sm },
   modalCancel: { backgroundColor: colors.background, borderWidth: 1, borderColor: colors.border },
-  modalCancelText: { color: colors.textSecondary, fontWeight: '600' },
-  modalDangerText: { color: colors.danger, fontWeight: '600' },
+  modalCancelText: { color: colors.textSecondary, fontFamily: fonts.semibold },
+  modalDangerText: { color: colors.danger, fontFamily: fonts.semibold },
   modalPrimary: { backgroundColor: colors.primary },
-  modalPrimaryText: { color: colors.white, fontWeight: '700' },
+  modalPrimaryText: { color: colors.white, fontFamily: fonts.bold },
   modalDanger: { backgroundColor: colors.danger },
-  modalWarning: { fontSize: 14, color: colors.textSecondary, lineHeight: 20 },
+  modalWarning: { fontSize: 14, color: colors.textSecondary, lineHeight: 20, fontFamily: fonts.regular },
   modalButtonDisabled: { opacity: 0.5 },
   unitRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm },
   unitButton: {
     flex: 1,
-    paddingVertical: 8,
-    borderRadius: radius.sm,
+    paddingVertical: 9,
+    borderRadius: radius.pill,
     backgroundColor: colors.primarySoft,
     borderWidth: 1,
     borderColor: colors.primarySoftBorder,
     alignItems: 'center',
   },
-  unitButtonText: { color: colors.primaryDark, fontWeight: '700', fontSize: 13 },
+  unitButtonText: { color: colors.primaryDark, fontFamily: fonts.bold, fontSize: 13 },
   checkboxChoiceRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm },
   checkboxChoiceButton: {
     flex: 1,
     alignItems: 'center',
     gap: 4,
     paddingVertical: spacing.md,
-    borderRadius: radius.sm,
+    borderRadius: radius.md,
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.background,
@@ -1096,14 +1080,14 @@ const styles = StyleSheet.create({
   checkboxChoiceButtonActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   checkboxChoiceButtonActiveDanger: { backgroundColor: colors.danger, borderColor: colors.danger },
   checkboxChoiceButtonActiveMuted: { backgroundColor: colors.textMuted, borderColor: colors.textMuted },
-  checkboxChoiceLabel: { fontSize: 13, fontWeight: '700', color: colors.textSecondary },
+  checkboxChoiceLabel: { fontSize: 13, fontFamily: fonts.bold, color: colors.textSecondary },
   checkboxChoiceLabelActive: { color: colors.white },
-  formatPickerTitle: { fontSize: 16, fontWeight: '700', color: colors.textPrimary },
+  formatPickerTitle: { fontSize: 16, fontFamily: fonts.bold, color: colors.textPrimary },
   formatOption: {
     flexDirection: 'row',
     alignItems: 'center',
     padding: spacing.md,
-    borderRadius: radius.sm,
+    borderRadius: radius.md,
     borderWidth: 1,
     borderColor: colors.border,
     marginBottom: spacing.sm,
@@ -1111,39 +1095,39 @@ const styles = StyleSheet.create({
   formatOptionActive: { borderColor: colors.primary, backgroundColor: colors.primarySoft },
   formatOptionLast: { marginBottom: 0 },
   formatOptionIconWrap: {
-    width: 32,
-    height: 32,
-    borderRadius: radius.sm,
+    width: 34,
+    height: 34,
+    borderRadius: radius.pill,
     backgroundColor: colors.primarySoft,
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: spacing.md,
   },
-  formatOptionIconWrapDanger: { backgroundColor: '#FCE7E7' },
+  formatOptionIconWrapDanger: { backgroundColor: colors.dangerSoft },
   formatOptionTextWrap: { flex: 1 },
-  formatOptionLabel: { fontSize: 14, fontWeight: '700', color: colors.textPrimary },
+  formatOptionLabel: { fontSize: 14, fontFamily: fonts.bold, color: colors.textPrimary },
   formatOptionLabelDanger: { color: colors.danger },
-  formatOptionDesc: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+  formatOptionDesc: { fontSize: 12, color: colors.textMuted, marginTop: 2, fontFamily: fonts.regular },
   widthSection: { borderTopWidth: 1, borderTopColor: colors.border, paddingTop: spacing.md, marginTop: spacing.sm },
   widthLinkRow: { flexDirection: 'row', justifyContent: 'center', gap: spacing.lg, marginTop: spacing.xs },
-  autoFitLink: { color: colors.primary, fontWeight: '600', fontSize: 13 },
+  autoFitLink: { color: colors.primary, fontFamily: fonts.semibold, fontSize: 13 },
   stepperRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     marginBottom: spacing.md,
   },
-  stepperLabel: { fontSize: 14, color: colors.textPrimary },
+  stepperLabel: { fontSize: 14, color: colors.textPrimary, fontFamily: fonts.medium },
   stepperControl: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
   stepperButton: {
-    width: 30,
-    height: 30,
-    borderRadius: radius.sm,
+    width: 32,
+    height: 32,
+    borderRadius: radius.pill,
     backgroundColor: colors.primarySoft,
     borderWidth: 1,
     borderColor: colors.primarySoftBorder,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  stepperValue: { minWidth: 24, textAlign: 'center', fontSize: 15, fontWeight: '700', color: colors.textPrimary },
+  stepperValue: { minWidth: 24, textAlign: 'center', fontSize: 15, fontFamily: fonts.bold, color: colors.textPrimary },
 });

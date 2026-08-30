@@ -4,7 +4,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import SheetListScreen from '../screens/SheetListScreen';
 import TabListScreen from '../screens/TabListScreen';
 import TabDetailScreen from '../screens/TabDetailScreen';
-import { colors } from '../theme';
+import { colors, fonts } from '../theme';
 
 export type RootStackParamList = {
   SheetList: undefined;
@@ -20,7 +20,7 @@ const navigationTheme = {
     ...DefaultTheme.colors,
     primary: colors.primary,
     background: colors.background,
-    card: colors.surface,
+    card: colors.background,
     text: colors.textPrimary,
     border: colors.border,
   },
@@ -33,18 +33,15 @@ export default function RootNavigator() {
         initialRouteName="SheetList"
         screenOptions={{
           headerShadowVisible: false,
-          headerStyle: { backgroundColor: colors.surface },
-          headerTitleStyle: { fontWeight: '700', color: colors.textPrimary },
-          headerTintColor: colors.primary,
+          headerStyle: { backgroundColor: colors.background },
+          headerTitleStyle: { fontFamily: fonts.bold, color: colors.textPrimary, fontSize: 17 },
+          headerTintColor: colors.primaryDark,
+          headerBackTitleVisible: false,
           contentStyle: { backgroundColor: colors.background },
         }}
       >
-        <Stack.Screen name="SheetList" component={SheetListScreen} options={{ title: '시트' }} />
-        <Stack.Screen
-          name="TabList"
-          component={TabListScreen}
-          options={({ route }) => ({ title: route.params.sheetName })}
-        />
+        <Stack.Screen name="SheetList" component={SheetListScreen} options={{ headerShown: false }} />
+        <Stack.Screen name="TabList" component={TabListScreen} options={{ headerShown: false }} />
         <Stack.Screen
           name="TabDetail"
           component={TabDetailScreen}

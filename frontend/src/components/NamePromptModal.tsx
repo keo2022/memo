@@ -1,7 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { Modal, View, Text, TextInput, TouchableOpacity, StyleSheet } from 'react-native';
+import { Modal, View, Text, TextInput, TouchableOpacity, StyleSheet, KeyboardAvoidingView, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, radius, spacing, shadow } from '../theme';
+import Animated, { BounceIn } from 'react-native-reanimated';
+import { colors, radius, spacing, shadow, fonts, type } from '../theme';
+import RingMascot from './mascot/RingMascot';
+import Squishy from './Squishy';
+import { useReduceMotion } from '../hooks/useReduceMotion';
 
 interface Props {
   visible: boolean;
@@ -13,6 +17,7 @@ interface Props {
 }
 
 export default function NamePromptModal({ visible, title, placeholder, confirmLabel = '추가', onClose, onConfirm }: Props) {
+  const reduceMotion = useReduceMotion();
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -42,14 +47,20 @@ export default function NamePromptModal({ visible, title, placeholder, confirmLa
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={handleClose}>
-      <View style={styles.backdrop}>
-        <View style={styles.card}>
-          <View style={styles.header}>
-            <Text style={styles.title}>{title}</Text>
-            <TouchableOpacity onPress={handleClose} hitSlop={8}>
-              <Ionicons name="close" size={22} color={colors.textMuted} />
-            </TouchableOpacity>
+      <KeyboardAvoidingView style={styles.backdrop} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <Animated.View
+          key={visible ? 'open' : 'closed'}
+          entering={reduceMotion ? undefined : BounceIn}
+          style={styles.card}
+        >
+          <View style={styles.mascotWrap}>
+            <RingMascot size={62} mood="excited" animated />
           </View>
+          <TouchableOpacity onPress={handleClose} hitSlop={8} style={styles.close}>
+            <Ionicons name="close" size={22} color={colors.textMuted} />
+          </TouchableOpacity>
+
+          <Text style={styles.title}>{title}</Text>
 
           <TextInput
             style={styles.input}
@@ -63,53 +74,59 @@ export default function NamePromptModal({ visible, title, placeholder, confirmLa
           />
 
           <View style={styles.actions}>
-            <TouchableOpacity style={[styles.button, styles.buttonCancel]} onPress={handleClose} disabled={busy}>
+            <Squishy style={[styles.button, styles.buttonCancel]} onPress={handleClose} disabled={busy}>
               <Text style={styles.buttonCancelText}>취소</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
+            </Squishy>
+            <Squishy
               style={[styles.button, styles.buttonPrimary, !name.trim() && styles.buttonDisabled]}
               onPress={handleConfirm}
               disabled={busy || !name.trim()}
             >
               <Text style={styles.buttonPrimaryText}>{confirmLabel}</Text>
-            </TouchableOpacity>
+            </Squishy>
           </View>
-        </View>
-      </View>
+        </Animated.View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  backdrop: { flex: 1, backgroundColor: 'rgba(18,33,23,0.45)', alignItems: 'center', justifyContent: 'center' },
+  backdrop: { flex: 1, backgroundColor: 'rgba(58,46,48,0.4)', alignItems: 'center', justifyContent: 'center' },
   card: {
-    width: '85%',
+    width: '86%',
     backgroundColor: colors.surface,
-    borderRadius: radius.lg,
-    padding: spacing.lg,
+    borderRadius: radius.xl,
+    paddingTop: spacing.xl + spacing.md,
+    paddingBottom: spacing.lg,
+    paddingHorizontal: spacing.lg,
+    marginTop: 24,
     ...shadow.floating,
   },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: spacing.md,
-  },
-  title: { fontSize: 16, fontWeight: '700', color: colors.textPrimary, flex: 1, marginRight: spacing.sm },
+  mascotWrap: { position: 'absolute', top: -30, alignSelf: 'center' },
+  close: { position: 'absolute', top: spacing.md, right: spacing.md, padding: 2 },
+  title: { ...type.title, fontSize: 20, textAlign: 'center', marginBottom: spacing.md },
   input: {
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.sm,
-    padding: 12,
+    borderWidth: 1.5,
+    borderColor: colors.primarySoftBorder,
+    borderRadius: radius.md,
+    padding: 13,
     fontSize: 15,
     color: colors.textPrimary,
     backgroundColor: colors.background,
+    fontFamily: fonts.medium,
   },
-  actions: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: spacing.lg },
-  button: { paddingHorizontal: spacing.lg, paddingVertical: 10, borderRadius: radius.sm, marginLeft: spacing.sm },
+  actions: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: spacing.lg, gap: spacing.sm },
+  button: {
+    paddingHorizontal: spacing.lg,
+    paddingVertical: 12,
+    borderRadius: radius.pill,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   buttonCancel: { backgroundColor: colors.background, borderWidth: 1, borderColor: colors.border },
-  buttonCancelText: { color: colors.textSecondary, fontWeight: '600' },
-  buttonPrimary: { backgroundColor: colors.primary },
-  buttonPrimaryText: { color: colors.white, fontWeight: '700' },
+  buttonCancelText: { color: colors.textSecondary, fontFamily: fonts.semibold },
+  buttonPrimary: { backgroundColor: colors.primary, ...shadow.glow },
+  buttonPrimaryText: { color: colors.white, fontFamily: fonts.bold },
   buttonDisabled: { opacity: 0.5 },
 });
