@@ -43,6 +43,11 @@ export function formatKoreanDate(date: string): string {
   return `${p.y}년 ${p.m}월 ${p.d}일 (${wd})`;
 }
 
+export function todayLabel(): string {
+  const t = new Date();
+  return `${t.getMonth() + 1}월 ${t.getDate()}일 ${WEEKDAYS[t.getDay()]}요일`;
+}
+
 export function relativeTime(ts: number): string {
   const diff = Date.now() - ts;
   const min = Math.floor(diff / 60000);

@@ -7,10 +7,9 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api } from '../db/repository';
 import type { EventItem } from '../types';
 import { colors, radius, spacing, shadow, fonts, type } from '../theme';
-import PeaMascot from '../components/mascot/PeaMascot';
 import EventEditModal from '../components/EventEditModal';
 import SettingsModal from '../components/SettingsModal';
-import { daysUntil, ddayLabel, formatKoreanDate } from '../lib/date';
+import { daysUntil, ddayLabel, formatKoreanDate, todayLabel } from '../lib/date';
 import { useReduceMotion } from '../hooks/useReduceMotion';
 
 type ModalState =
@@ -86,21 +85,15 @@ export default function HomeScreen() {
         }
       >
         <View style={styles.topRow}>
-          <View>
-            <Text style={styles.hello}>우리 결혼 준비</Text>
-            <Text style={styles.helloSub}>둘이 함께 채워가요</Text>
-          </View>
-          <View style={styles.topRight}>
-            <TouchableOpacity
-              onPress={() => setSettingsOpen(true)}
-              hitSlop={10}
-              style={styles.gearButton}
-              activeOpacity={0.7}
-            >
-              <Ionicons name="settings-outline" size={20} color={colors.textMuted} />
-            </TouchableOpacity>
-            <PeaMascot size={52} mood="wink" animated />
-          </View>
+          <Text style={styles.today}>{todayLabel()}</Text>
+          <TouchableOpacity
+            onPress={() => setSettingsOpen(true)}
+            hitSlop={10}
+            style={styles.gearButton}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="settings-outline" size={20} color={colors.textMuted} />
+          </TouchableOpacity>
         </View>
 
         {hero ? (
@@ -200,9 +193,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
     marginBottom: spacing.lg,
   },
-  hello: { ...type.display, fontSize: 26 },
-  helloSub: { ...type.caption, marginTop: 4 },
-  topRight: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  today: { fontSize: 14, fontFamily: fonts.semibold, color: colors.textSecondary, letterSpacing: 0.2 },
   gearButton: { padding: 4 },
   heroCard: {
     marginHorizontal: spacing.lg,
