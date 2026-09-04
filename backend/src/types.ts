@@ -16,6 +16,9 @@ export interface Tab {
 export interface CellData {
   value: string;
   formula?: string;
+  // 마지막으로 수정된 시각(ms)과 수정한 사람. 동시 편집 충돌 감지·변경 이력에 씁니다.
+  updatedAt?: number;
+  updatedBy?: string;
 }
 
 export type ColumnFormat = 'text' | 'checkbox' | 'number';
@@ -25,4 +28,39 @@ export interface Merge {
   anchorCol: number;
   rowSpan: number;
   colSpan: number;
+}
+
+export interface EventItem {
+  id: string;
+  title: string;
+  date: string; // 'YYYY-MM-DD'
+  order: number;
+}
+
+export interface MemoSummary {
+  id: string;
+  title: string;
+  order: number;
+  updatedAt?: number;
+  updatedBy?: string;
+}
+
+export interface Memo extends MemoSummary {
+  content: string;
+  createdAt: number;
+}
+
+// 셀 하나가 바뀔 때마다 남기는 감사 로그 1건.
+export interface HistoryEntry {
+  id: number;
+  tabId: string;
+  row: number;
+  col: number;
+  prevValue: string;
+  prevFormula?: string;
+  nextValue: string;
+  nextFormula?: string;
+  editor?: string;
+  kind: 'edit' | 'revert';
+  createdAt: number;
 }

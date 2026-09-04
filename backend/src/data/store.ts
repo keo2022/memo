@@ -1,8 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
-import { DatabaseSync } from 'node:sqlite';
-import { Sheet, Tab, CellData, ColumnFormat, Merge } from '../types';
+import Database from 'better-sqlite3';
+import { Sheet, Tab, CellData, ColumnFormat, Merge, HistoryEntry, EventItem, MemoSummary, Memo } from '../types';
 import { shiftFormulaRefs } from '../formula/shiftRefs';
 
 // 클라우드에 영구 디스크(volume)를 붙였다면 DB_PATH 환경변수로 그 경로를 가리키게 하세요.
@@ -10,7 +10,11 @@ import { shiftFormulaRefs } from '../formula/shiftRefs';
 const DB_PATH = process.env.DB_PATH ?? path.join(__dirname, '..', '..', 'data', 'db.sqlite');
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-const db = new DatabaseSync(DB_PATH);
+const db = new Database(DB_PATH);
+
+// 둘이 동시에 읽고 쓸 때 쓰기가 읽기를 막지 않도록 WAL 모드로 켭니다.
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
 
 function tableExists(name: string): boolean {
   return !!db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
@@ -85,6 +89,51 @@ try {
   // 이미 컬럼이 있는 경우
 }
 
+// cells에 "누가 언제 고쳤는지"를 나중에 추가했습니다. 동시 편집 충돌 감지에 씁니다.
+if (!columnExists('cells', 'updated_at')) {
+  db.exec('ALTER TABLE cells ADD COLUMN updated_at INTEGER');
+}
+if (!columnExists('cells', 'updated_by')) {
+  db.exec('ALTER TABLE cells ADD COLUMN updated_by TEXT');
+}
+
+// 셀 값이 바뀔 때마다 한 줄씩 쌓는 변경 이력. 되돌리기·"누가 언제 뭘 바꿨나" 확인에 씁니다.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS cell_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tab_id TEXT NOT NULL,
+    row INTEGER NOT NULL,
+    col INTEGER NOT NULL,
+    prev_value TEXT NOT NULL DEFAULT '',
+    prev_formula TEXT,
+    next_value TEXT NOT NULL DEFAULT '',
+    next_formula TEXT,
+    editor TEXT,
+    kind TEXT NOT NULL DEFAULT 'edit',
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_cell_history_tab ON cell_history (tab_id, id DESC);
+`);
+
+// 메인화면용 기념일/D-day 목록. date는 'YYYY-MM-DD' 문자열.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS events (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    date TEXT NOT NULL,
+    order_num INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE TABLE IF NOT EXISTS memos (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL DEFAULT '',
+    order_num INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER,
+    updated_by TEXT
+  );
+`);
+
 // tabs에 order_num 컬럼을 나중에 추가했습니다. 기존 탭들은 sheet별로 rowid(생성 순서) 기준으로 순번을 매겨줍니다.
 if (!columnExists('tabs', 'order_num')) {
   db.exec('ALTER TABLE tabs ADD COLUMN order_num INTEGER NOT NULL DEFAULT 0');
@@ -118,7 +167,45 @@ interface CellRow {
   col: number;
   value: string;
   formula: string | null;
+  updated_at: number | null;
+  updated_by: string | null;
 }
+
+// 행/열 삽입·삭제로 셀을 지웠다가 다시 넣을 때 updated_at/updated_by까지 그대로 옮기기 위한 공통 컬럼 목록.
+const CELL_COLS = 'row, col, value, formula, updated_at, updated_by';
+const insertCellSql =
+  'INSERT INTO cells (tab_id, row, col, value, formula, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?)';
+function reinsertCell(tabId: string, c: CellRow, rowDelta: number, colDelta: number) {
+  return [tabId, c.row + rowDelta, c.col + colDelta, c.value, c.formula, c.updated_at, c.updated_by] as const;
+}
+
+interface HistoryRow {
+  id: number;
+  tab_id: string;
+  row: number;
+  col: number;
+  prev_value: string;
+  prev_formula: string | null;
+  next_value: string;
+  next_formula: string | null;
+  editor: string | null;
+  kind: string;
+  created_at: number;
+}
+
+const toHistory = (r: HistoryRow): HistoryEntry => ({
+  id: r.id,
+  tabId: r.tab_id,
+  row: r.row,
+  col: r.col,
+  prevValue: r.prev_value,
+  prevFormula: r.prev_formula ?? undefined,
+  nextValue: r.next_value,
+  nextFormula: r.next_formula ?? undefined,
+  editor: r.editor ?? undefined,
+  kind: r.kind === 'revert' ? 'revert' : 'edit',
+  createdAt: r.created_at,
+});
 
 const toSheet = (row: SheetRow): Sheet => ({ id: row.id, name: row.name, order: row.order_num });
 const toTab = (row: TabRow): Tab => ({
@@ -142,7 +229,7 @@ interface TabSnapshot {
 const lastDeleteSnapshots = new Map<string, TabSnapshot>();
 
 function snapshotTab(tabId: string, tab: Tab): TabSnapshot {
-  const cells = db.prepare('SELECT row, col, value, formula FROM cells WHERE tab_id = ?').all(tabId) as unknown as CellRow[];
+  const cells = db.prepare(`SELECT ${CELL_COLS} FROM cells WHERE tab_id = ?`).all(tabId) as unknown as CellRow[];
   const columnFormats = db
     .prepare('SELECT col, format, width FROM column_formats WHERE tab_id = ?')
     .all(tabId) as unknown as { col: number; format: ColumnFormat; width: number | null }[];
@@ -243,11 +330,11 @@ export const store = {
     db.exec('BEGIN');
     try {
       const shifted = db
-        .prepare('SELECT row, col, value, formula FROM cells WHERE tab_id = ? AND row >= ?')
+        .prepare(`SELECT ${CELL_COLS} FROM cells WHERE tab_id = ? AND row >= ?`)
         .all(tabId, index) as unknown as CellRow[];
       db.prepare('DELETE FROM cells WHERE tab_id = ? AND row >= ?').run(tabId, index);
-      const insertCell = db.prepare('INSERT INTO cells (tab_id, row, col, value, formula) VALUES (?, ?, ?, ?, ?)');
-      shifted.forEach((c) => insertCell.run(tabId, c.row + 1, c.col, c.value, c.formula));
+      const insertCell = db.prepare(insertCellSql);
+      shifted.forEach((c) => insertCell.run(...reinsertCell(tabId, c, 1, 0)));
 
       const formulaCells = db
         .prepare('SELECT row, col, formula FROM cells WHERE tab_id = ? AND formula IS NOT NULL')
@@ -288,11 +375,11 @@ export const store = {
     db.exec('BEGIN');
     try {
       const shiftedCells = db
-        .prepare('SELECT row, col, value, formula FROM cells WHERE tab_id = ? AND col >= ?')
+        .prepare(`SELECT ${CELL_COLS} FROM cells WHERE tab_id = ? AND col >= ?`)
         .all(tabId, index) as unknown as CellRow[];
       db.prepare('DELETE FROM cells WHERE tab_id = ? AND col >= ?').run(tabId, index);
-      const insertCell = db.prepare('INSERT INTO cells (tab_id, row, col, value, formula) VALUES (?, ?, ?, ?, ?)');
-      shiftedCells.forEach((c) => insertCell.run(tabId, c.row, c.col + 1, c.value, c.formula));
+      const insertCell = db.prepare(insertCellSql);
+      shiftedCells.forEach((c) => insertCell.run(...reinsertCell(tabId, c, 0, 1)));
 
       const formulaCells = db
         .prepare('SELECT row, col, formula FROM cells WHERE tab_id = ? AND formula IS NOT NULL')
@@ -347,11 +434,11 @@ export const store = {
       db.prepare('DELETE FROM cells WHERE tab_id = ? AND row = ?').run(tabId, index);
 
       const shifted = db
-        .prepare('SELECT row, col, value, formula FROM cells WHERE tab_id = ? AND row > ?')
+        .prepare(`SELECT ${CELL_COLS} FROM cells WHERE tab_id = ? AND row > ?`)
         .all(tabId, index) as unknown as CellRow[];
       db.prepare('DELETE FROM cells WHERE tab_id = ? AND row > ?').run(tabId, index);
-      const insertCell = db.prepare('INSERT INTO cells (tab_id, row, col, value, formula) VALUES (?, ?, ?, ?, ?)');
-      shifted.forEach((c) => insertCell.run(tabId, c.row - 1, c.col, c.value, c.formula));
+      const insertCell = db.prepare(insertCellSql);
+      shifted.forEach((c) => insertCell.run(...reinsertCell(tabId, c, -1, 0)));
 
       const formulaCells = db
         .prepare('SELECT row, col, formula FROM cells WHERE tab_id = ? AND formula IS NOT NULL')
@@ -396,11 +483,11 @@ export const store = {
       db.prepare('DELETE FROM cells WHERE tab_id = ? AND col = ?').run(tabId, index);
 
       const shiftedCells = db
-        .prepare('SELECT row, col, value, formula FROM cells WHERE tab_id = ? AND col > ?')
+        .prepare(`SELECT ${CELL_COLS} FROM cells WHERE tab_id = ? AND col > ?`)
         .all(tabId, index) as unknown as CellRow[];
       db.prepare('DELETE FROM cells WHERE tab_id = ? AND col > ?').run(tabId, index);
-      const insertCell = db.prepare('INSERT INTO cells (tab_id, row, col, value, formula) VALUES (?, ?, ?, ?, ?)');
-      shiftedCells.forEach((c) => insertCell.run(tabId, c.row, c.col - 1, c.value, c.formula));
+      const insertCell = db.prepare(insertCellSql);
+      shiftedCells.forEach((c) => insertCell.run(...reinsertCell(tabId, c, 0, -1)));
 
       const formulaCells = db
         .prepare('SELECT row, col, formula FROM cells WHERE tab_id = ? AND formula IS NOT NULL')
@@ -456,8 +543,8 @@ export const store = {
       db.prepare('DELETE FROM column_formats WHERE tab_id = ?').run(tabId);
       db.prepare('DELETE FROM merges WHERE tab_id = ?').run(tabId);
 
-      const insertCell = db.prepare('INSERT INTO cells (tab_id, row, col, value, formula) VALUES (?, ?, ?, ?, ?)');
-      snapshot.cells.forEach((c) => insertCell.run(tabId, c.row, c.col, c.value, c.formula));
+      const insertCell = db.prepare(insertCellSql);
+      snapshot.cells.forEach((c) => insertCell.run(...reinsertCell(tabId, c, 0, 0)));
 
       const insertFormat = db.prepare(
         'INSERT INTO column_formats (tab_id, col, format, width) VALUES (?, ?, ?, ?)'
@@ -492,26 +579,122 @@ export const store = {
     db.prepare('DELETE FROM cells WHERE tab_id = ?').run(tabId);
     db.prepare('DELETE FROM column_formats WHERE tab_id = ?').run(tabId);
     db.prepare('DELETE FROM merges WHERE tab_id = ?').run(tabId);
+    db.prepare('DELETE FROM cell_history WHERE tab_id = ?').run(tabId);
     db.prepare('DELETE FROM tabs WHERE id = ?').run(tabId);
     lastDeleteSnapshots.delete(tabId);
   },
 
   getCells(tabId: string): Record<string, CellData> {
     const rows = db
-      .prepare('SELECT row, col, value, formula FROM cells WHERE tab_id = ?')
+      .prepare(`SELECT ${CELL_COLS} FROM cells WHERE tab_id = ?`)
       .all(tabId) as unknown as CellRow[];
     const result: Record<string, CellData> = {};
     rows.forEach((r) => {
-      result[`${r.row}_${r.col}`] = { value: r.value, formula: r.formula ?? undefined };
+      result[`${r.row}_${r.col}`] = {
+        value: r.value,
+        formula: r.formula ?? undefined,
+        updatedAt: r.updated_at ?? undefined,
+        updatedBy: r.updated_by ?? undefined,
+      };
     });
     return result;
   },
 
-  setCell(tabId: string, row: number, col: number, data: CellData) {
-    db.prepare(
-      `INSERT INTO cells (tab_id, row, col, value, formula) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(tab_id, row, col) DO UPDATE SET value = excluded.value, formula = excluded.formula`
-    ).run(tabId, row, col, data.value, data.formula ?? null);
+  // 그 셀이 마지막으로 수정된 시각(ms). 한 번도 안 쓴 셀이면 null.
+  getCellMeta(tabId: string, row: number, col: number): number | null {
+    const r = db
+      .prepare('SELECT value, formula, updated_at FROM cells WHERE tab_id = ? AND row = ? AND col = ?')
+      .get(tabId, row, col) as unknown as { value: string; formula: string | null; updated_at: number | null } | undefined;
+    return r?.updated_at ?? null;
+  },
+
+  // 셀 값을 바꾸면서 변경 이력을 한 줄 남깁니다. 실제로 바뀐 게 없으면 아무것도 안 하고 기존 시각을 돌려줍니다.
+  // 반환값은 이 셀의 새 updated_at(ms) — 클라이언트가 다음 저장 때 충돌 감지 기준으로 다시 보냅니다.
+  recordAndSetCell(
+    tabId: string,
+    row: number,
+    col: number,
+    data: CellData,
+    editor: string | undefined,
+    kind: 'edit' | 'revert' = 'edit'
+  ): number {
+    const existing = db
+      .prepare('SELECT value, formula, updated_at FROM cells WHERE tab_id = ? AND row = ? AND col = ?')
+      .get(tabId, row, col) as unknown as { value: string; formula: string | null; updated_at: number | null } | undefined;
+
+    const nextFormula = data.formula ?? null;
+    if (existing && existing.value === data.value && (existing.formula ?? null) === nextFormula) {
+      return existing.updated_at ?? 0;
+    }
+
+    const now = Date.now();
+    db.exec('BEGIN');
+    try {
+      db.prepare(
+        `INSERT INTO cells (tab_id, row, col, value, formula, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(tab_id, row, col) DO UPDATE SET value = excluded.value, formula = excluded.formula,
+           updated_at = excluded.updated_at, updated_by = excluded.updated_by`
+      ).run(tabId, row, col, data.value, nextFormula, now, editor ?? null);
+
+      db.prepare(
+        `INSERT INTO cell_history (tab_id, row, col, prev_value, prev_formula, next_value, next_formula, editor, kind, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        tabId,
+        row,
+        col,
+        existing?.value ?? '',
+        existing?.formula ?? null,
+        data.value,
+        nextFormula,
+        editor ?? null,
+        kind,
+        now
+      );
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+    return now;
+  },
+
+  listHistory(tabId: string, limit = 30): HistoryEntry[] {
+    const rows = db
+      .prepare(
+        `SELECT id, tab_id, row, col, prev_value, prev_formula, next_value, next_formula, editor, kind, created_at
+         FROM cell_history WHERE tab_id = ? ORDER BY id DESC LIMIT ?`
+      )
+      .all(tabId, limit) as unknown as HistoryRow[];
+    return rows.map(toHistory);
+  },
+
+  // 이력 한 건을 그 이전 값으로 되돌립니다. 그 사이 다른 수정이 있었으면(= 최신 이력이 아니면) 거절합니다.
+  revertCell(
+    tabId: string,
+    historyId: number,
+    editor: string | undefined
+  ): { ok: true; row: number; col: number; updatedAt: number } | { ok: false; reason: 'not_found' | 'stale' } {
+    const entry = db
+      .prepare('SELECT id, row, col, prev_value, prev_formula, created_at FROM cell_history WHERE id = ? AND tab_id = ?')
+      .get(historyId, tabId) as unknown as
+      | { id: number; row: number; col: number; prev_value: string; prev_formula: string | null; created_at: number }
+      | undefined;
+    if (!entry) return { ok: false, reason: 'not_found' };
+
+    if (store.getCellMeta(tabId, entry.row, entry.col) !== entry.created_at) {
+      return { ok: false, reason: 'stale' };
+    }
+
+    const updatedAt = store.recordAndSetCell(
+      tabId,
+      entry.row,
+      entry.col,
+      { value: entry.prev_value, formula: entry.prev_formula ?? undefined },
+      editor,
+      'revert'
+    );
+    return { ok: true, row: entry.row, col: entry.col, updatedAt };
   },
 
   getColumnFormats(tabId: string): Record<number, ColumnFormat> {
@@ -580,5 +763,124 @@ export const store = {
       anchorRow,
       anchorCol
     );
+  },
+
+  // ── 메인화면: 기념일 / D-day ──────────────────────────────
+  listEvents(): EventItem[] {
+    const rows = db
+      .prepare('SELECT id, title, date, order_num FROM events ORDER BY date ASC, order_num ASC')
+      .all() as unknown as { id: string; title: string; date: string; order_num: number }[];
+    return rows.map((r) => ({ id: r.id, title: r.title, date: r.date, order: r.order_num }));
+  },
+
+  createEvent(title: string, date: string): EventItem {
+    const { c } = db.prepare('SELECT COUNT(*) as c FROM events').get() as unknown as { c: number };
+    const id = randomUUID();
+    db.prepare('INSERT INTO events (id, title, date, order_num) VALUES (?, ?, ?, ?)').run(id, title, date, c);
+    return { id, title, date, order: c };
+  },
+
+  updateEvent(id: string, patch: { title?: string; date?: string }): EventItem | undefined {
+    const existing = db
+      .prepare('SELECT id, title, date, order_num FROM events WHERE id = ?')
+      .get(id) as unknown as { id: string; title: string; date: string; order_num: number } | undefined;
+    if (!existing) return undefined;
+    const title = patch.title ?? existing.title;
+    const date = patch.date ?? existing.date;
+    db.prepare('UPDATE events SET title = ?, date = ? WHERE id = ?').run(title, date, id);
+    return { id, title, date, order: existing.order_num };
+  },
+
+  deleteEvent(id: string) {
+    db.prepare('DELETE FROM events WHERE id = ?').run(id);
+  },
+
+  // ── 공유 메모장 ─────────────────────────────────────────
+  listMemos(): MemoSummary[] {
+    const rows = db
+      .prepare('SELECT id, title, order_num, updated_at, updated_by FROM memos ORDER BY order_num ASC')
+      .all() as unknown as {
+      id: string;
+      title: string;
+      order_num: number;
+      updated_at: number | null;
+      updated_by: string | null;
+    }[];
+    return rows.map((r) => ({
+      id: r.id,
+      title: r.title,
+      order: r.order_num,
+      updatedAt: r.updated_at ?? undefined,
+      updatedBy: r.updated_by ?? undefined,
+    }));
+  },
+
+  getMemo(id: string): Memo | undefined {
+    const r = db
+      .prepare('SELECT id, title, content, order_num, created_at, updated_at, updated_by FROM memos WHERE id = ?')
+      .get(id) as unknown as
+      | {
+          id: string;
+          title: string;
+          content: string;
+          order_num: number;
+          created_at: number;
+          updated_at: number | null;
+          updated_by: string | null;
+        }
+      | undefined;
+    if (!r) return undefined;
+    return {
+      id: r.id,
+      title: r.title,
+      content: r.content,
+      order: r.order_num,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at ?? undefined,
+      updatedBy: r.updated_by ?? undefined,
+    };
+  },
+
+  createMemo(title: string): Memo {
+    const { c } = db.prepare('SELECT COUNT(*) as c FROM memos').get() as unknown as { c: number };
+    const id = randomUUID();
+    const now = Date.now();
+    db.prepare(
+      'INSERT INTO memos (id, title, content, order_num, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(id, title, '', c, now, now);
+    return { id, title, content: '', order: c, createdAt: now, updatedAt: now };
+  },
+
+  // 반환값의 updatedAt은 새 수정 시각. 클라이언트가 다음 저장 때 충돌 감지 기준으로 다시 보냅니다.
+  updateMemo(
+    id: string,
+    patch: { title?: string; content?: string },
+    editor: string | undefined
+  ): Memo | undefined {
+    const existing = store.getMemo(id);
+    if (!existing) return undefined;
+    const title = patch.title ?? existing.title;
+    const content = patch.content ?? existing.content;
+    if (title === existing.title && content === existing.content) return existing;
+    const now = Date.now();
+    db.prepare('UPDATE memos SET title = ?, content = ?, updated_at = ?, updated_by = ? WHERE id = ?').run(
+      title,
+      content,
+      now,
+      editor ?? null,
+      id
+    );
+    return { ...existing, title, content, updatedAt: now, updatedBy: editor };
+  },
+
+  getMemoMeta(id: string): number | null {
+    const r = db.prepare('SELECT updated_at FROM memos WHERE id = ?').get(id) as unknown as
+      | { updated_at: number | null }
+      | undefined;
+    return r?.updated_at ?? null;
+  },
+
+  deleteMemo(id: string) {
+    db.prepare('DELETE FROM memos WHERE id = ?').run(id);
   },
 };

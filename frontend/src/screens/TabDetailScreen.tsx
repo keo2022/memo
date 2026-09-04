@@ -1,4 +1,4 @@
-import React, { useCallback, useLayoutEffect, useMemo, useState } from 'react';
+import React, { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -11,20 +11,38 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
+  RefreshControl,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import Animated, { BounceIn, ZoomIn, useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
 import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/RootNavigator';
-import { api } from '../db/repository';
+import { api, ConflictError, type ConflictCurrent } from '../db/repository';
 import type { CellInfo, ColumnFormat, Merge, Tab, TabDetail } from '../types';
 import { colors, radius, spacing, shadow, fonts, motion, type } from '../theme';
 import NamePromptModal from '../components/NamePromptModal';
+import HistoryModal from '../components/HistoryModal';
 import Snackbar from '../components/Snackbar';
 import HeartBurst from '../components/HeartBurst';
 import EmptyIllustration from '../components/illustrations/EmptyIllustration';
 import { useReduceMotion } from '../hooks/useReduceMotion';
+
+const POLL_INTERVAL_MS = 15000;
+
+type ConflictState = {
+  row: number;
+  col: number;
+  mineValue: string;
+  mineFormula?: string;
+  mineLabel: string;
+  current: ConflictCurrent | null;
+};
+
+function cellValueLabel(value: string, formula?: string): string {
+  if (formula) return formula;
+  return value === '' ? '(빈칸)' : value;
+}
 
 type Props = NativeStackScreenProps<RootStackParamList, 'TabDetail'>;
 
@@ -120,7 +138,23 @@ export default function TabDetailScreen({ route, navigation }: Props) {
     null
   );
   const [burst, setBurst] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const [historyVisible, setHistoryVisible] = useState(false);
+  const [conflict, setConflict] = useState<ConflictState | null>(null);
   const reduceMotion = useReduceMotion();
+
+  // 폴링(자동 새로고침) 중에 편집 중인 모달을 덮어쓰지 않도록, 뭔가 열려있으면 건너뜁니다.
+  const busyRef = useRef(false);
+  busyRef.current =
+    !!selected ||
+    !!mergeTarget ||
+    formatPickerCol !== null ||
+    !!insertPrompt ||
+    !!deleteConfirm ||
+    !!conflict ||
+    historyVisible ||
+    savingCell ||
+    resizing;
 
   const loadTab = useCallback(async () => {
     try {
@@ -166,13 +200,30 @@ export default function TabDetailScreen({ route, navigation }: Props) {
   useFocusEffect(
     useCallback(() => {
       loadTab();
+      // 상대방이 바꾼 내용을 주기적으로 가져옵니다. 편집 중이면(busyRef) 그 틱은 건너뜁니다.
+      const id = setInterval(() => {
+        if (!busyRef.current) loadTab();
+      }, POLL_INTERVAL_MS);
+      return () => clearInterval(id);
     }, [loadTab])
   );
+
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await loadTab();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [loadTab]);
 
   useLayoutEffect(() => {
     navigation.setOptions({
       headerRight: () => (
         <View style={styles.headerButtons}>
+          <TouchableOpacity onPress={() => setHistoryVisible(true)} hitSlop={8}>
+            <Ionicons name="time-outline" size={23} color={colors.primary} />
+          </TouchableOpacity>
           <TouchableOpacity onPress={() => navigation.navigate('TabList', { sheetId, sheetName })} hitSlop={8}>
             <Ionicons name="list-outline" size={24} color={colors.primary} />
           </TouchableOpacity>
@@ -259,12 +310,47 @@ export default function TabDetailScreen({ route, navigation }: Props) {
     setDraft(info.formula ? info.formula : info.value);
   };
 
+  // 셀 저장 공통 경로. 상대가 먼저 고쳤으면(ConflictError) 충돌 모달을 띄우고 false를 돌려줍니다.
+  const writeCell = async (
+    row: number,
+    col: number,
+    value: string,
+    formula: string | undefined,
+    baseUpdatedAt: number | null | undefined,
+    mineLabel: string
+  ): Promise<boolean> => {
+    try {
+      await api.updateCell(tab.id, row, col, value, formula, baseUpdatedAt);
+      return true;
+    } catch (e) {
+      if (e instanceof ConflictError) {
+        setConflict({
+          row,
+          col,
+          mineValue: value,
+          mineFormula: formula,
+          mineLabel,
+          current: (e.current ?? null) as ConflictCurrent | null,
+        });
+        return false;
+      }
+      throw e;
+    }
+  };
+
   const saveCheckbox = async (value: string) => {
     if (!selected || savingCell) return;
     setSavingCell(true);
     try {
-      await api.updateCell(tab.id, selected.row, selected.col, value);
-      if (value) setBurst((b) => b + 1);
+      const ok = await writeCell(
+        selected.row,
+        selected.col,
+        value,
+        undefined,
+        selected.updatedAt ?? null,
+        cellValueLabel(value)
+      );
+      if (ok && value) setBurst((b) => b + 1);
       setSelected(null);
       await loadTab();
     } catch (e) {
@@ -447,14 +533,15 @@ export default function TabDetailScreen({ route, navigation }: Props) {
     const isFormula = draft.trim().startsWith('=');
     setSavingCell(true);
     try {
-      await api.updateCell(
-        tab.id,
+      const ok = await writeCell(
         selected.row,
         selected.col,
         isFormula ? '' : draft,
-        isFormula ? draft.trim() : undefined
+        isFormula ? draft.trim() : undefined,
+        selected.updatedAt ?? null,
+        isFormula ? draft.trim() : cellValueLabel(draft)
       );
-      if (draft.trim()) setBurst((b) => b + 1);
+      if (ok && draft.trim()) setBurst((b) => b + 1);
       setSelected(null);
       await loadTab();
     } catch (e) {
@@ -468,13 +555,40 @@ export default function TabDetailScreen({ route, navigation }: Props) {
     if (!selected || savingCell) return;
     setSavingCell(true);
     try {
-      await api.updateCell(tab.id, selected.row, selected.col, '');
+      await writeCell(selected.row, selected.col, '', undefined, selected.updatedAt ?? null, '(빈칸)');
       setSelected(null);
       await loadTab();
     } catch (e) {
       Alert.alert('지우기 실패', String(e));
     } finally {
       setSavingCell(false);
+    }
+  };
+
+  const keepTheirs = async () => {
+    setConflict(null);
+    await loadTab();
+  };
+
+  const overwriteWithMine = async () => {
+    if (!conflict) return;
+    const c = conflict;
+    setConflict(null);
+    try {
+      const ok = await writeCell(
+        c.row,
+        c.col,
+        c.mineValue,
+        c.mineFormula,
+        c.current?.updatedAt ?? null,
+        c.mineLabel
+      );
+      if (ok) {
+        setBurst((b) => b + 1);
+        await loadTab();
+      }
+    } catch (e) {
+      Alert.alert('저장 실패', String(e));
     }
   };
 
@@ -581,7 +695,17 @@ export default function TabDetailScreen({ route, navigation }: Props) {
                 );
               })}
             </View>
-            <ScrollView showsVerticalScrollIndicator={false}>
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              refreshControl={
+                <RefreshControl
+                  refreshing={refreshing}
+                  onRefresh={handleRefresh}
+                  tintColor={colors.primary}
+                  colors={[colors.primary]}
+                />
+              }
+            >
               <View style={{ flexDirection: 'row' }}>
                 <View>
                   {Array.from({ length: tab.rows }).map((_, row) => (
@@ -944,6 +1068,56 @@ export default function TabDetailScreen({ route, navigation }: Props) {
         onConfirm={handleAddTab}
       />
 
+      <Modal visible={!!conflict} transparent animationType="fade" onRequestClose={keepTheirs}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.formatPickerTitle}>
+                {conflict ? `${colLabel(conflict.col)}${conflict.row + 1} 충돌` : ''}
+              </Text>
+            </View>
+            <Text style={styles.conflictLead}>
+              {conflict?.current?.updatedBy
+                ? `${conflict.current.updatedBy}님이 먼저 이 칸을 수정했어요.`
+                : '상대방이 먼저 이 칸을 수정했어요.'}
+            </Text>
+
+            <View style={styles.conflictCompare}>
+              <View style={styles.conflictSide}>
+                <Text style={styles.conflictSideLabel}>상대 값</Text>
+                <Text style={styles.conflictTheirs} numberOfLines={3}>
+                  {conflict?.current
+                    ? cellValueLabel(conflict.current.value, conflict.current.formula)
+                    : '(알 수 없음)'}
+                </Text>
+              </View>
+              <View style={styles.conflictSide}>
+                <Text style={styles.conflictSideLabel}>내 값</Text>
+                <Text style={styles.conflictMine} numberOfLines={3}>
+                  {conflict?.mineLabel}
+                </Text>
+              </View>
+            </View>
+
+            <View style={styles.modalActions}>
+              <TouchableOpacity onPress={keepTheirs} style={[styles.modalButton, styles.modalCancel]}>
+                <Text style={styles.modalCancelText}>상대 값 유지</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={overwriteWithMine} style={[styles.modalButton, styles.modalPrimary]}>
+                <Text style={styles.modalPrimaryText}>내 값으로 덮기</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <HistoryModal
+        visible={historyVisible}
+        tabId={tab.id}
+        onClose={() => setHistoryVisible(false)}
+        onReverted={loadTab}
+      />
+
       <Snackbar
         visible={!!snackbar}
         message={snackbar?.message ?? ''}
@@ -1130,4 +1304,17 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   stepperValue: { minWidth: 24, textAlign: 'center', fontSize: 15, fontFamily: fonts.bold, color: colors.textPrimary },
+  conflictLead: { fontSize: 14, color: colors.textSecondary, lineHeight: 20, fontFamily: fonts.medium },
+  conflictCompare: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md },
+  conflictSide: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    padding: spacing.md,
+    backgroundColor: colors.background,
+  },
+  conflictSideLabel: { fontSize: 11, fontFamily: fonts.bold, color: colors.textMuted, marginBottom: 4 },
+  conflictTheirs: { fontSize: 14, fontFamily: fonts.bold, color: colors.textPrimary },
+  conflictMine: { fontSize: 14, fontFamily: fonts.bold, color: colors.primaryDark },
 });

@@ -19,16 +19,47 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-function computeCell(tabId: string, row: number, col: number, cache: Map<string, number>): number {
+// 로그인은 없지만, 각 기기가 보낸 X-Editor 헤더로 "누가 고쳤는지"만 기록합니다.
+// HTTP 헤더는 ASCII만 안전해서 클라이언트가 encodeURIComponent로 인코딩해 보냅니다.
+app.use((req, _res, next) => {
+  const raw = req.header('X-Editor');
+  let decoded = '';
+  if (raw) {
+    try {
+      decoded = decodeURIComponent(raw);
+    } catch {
+      decoded = raw;
+    }
+  }
+  const trimmed = decoded.trim().slice(0, 40);
+  (req as express.Request & { editor?: string }).editor = trimmed || undefined;
+  next();
+});
+
+function getEditor(req: express.Request): string | undefined {
+  return (req as express.Request & { editor?: string }).editor;
+}
+
+// stack: 지금 계산 중인 셀들. 순환 참조(A1=B1, B1=A1)면 무한 재귀로 서버가 죽으므로 0으로 끊습니다.
+function computeCell(
+  tabId: string,
+  row: number,
+  col: number,
+  cache: Map<string, number>,
+  stack: Set<string> = new Set()
+): number {
   const key = `${row}_${col}`;
   if (cache.has(key)) return cache.get(key)!;
+  if (stack.has(key)) return 0;
 
   const cells = store.getCells(tabId);
   const cell = cells[key];
   if (!cell) return 0;
 
   if (cell.formula) {
-    const value = evaluateFormula(cell.formula, (r, c) => computeCell(tabId, r, c, cache));
+    stack.add(key);
+    const value = evaluateFormula(cell.formula, (r, c) => computeCell(tabId, r, c, cache, stack));
+    stack.delete(key);
     cache.set(key, value);
     return value;
   }
@@ -38,6 +69,10 @@ function computeCell(tabId: string, row: number, col: number, cache: Map<string,
   cache.set(key, value);
   return value;
 }
+
+app.get('/health', (_req, res) => {
+  res.json({ ok: true });
+});
 
 app.get('/api/sheets', (_req, res) => {
   res.json(store.listSheets());
@@ -158,7 +193,15 @@ app.get('/api/tabs/:tabId', (req, res) => {
 
   const cells = store.getCells(tab.id);
   const cache = new Map<string, number>();
-  const grid: { row: number; col: number; value: string; formula?: string; computed: number }[] = [];
+  const grid: {
+    row: number;
+    col: number;
+    value: string;
+    formula?: string;
+    computed: number;
+    updatedAt?: number;
+    updatedBy?: string;
+  }[] = [];
 
   for (let r = 0; r < tab.rows; r++) {
     for (let c = 0; c < tab.cols; c++) {
@@ -170,6 +213,8 @@ app.get('/api/tabs/:tabId', (req, res) => {
         value: cell?.value ?? '',
         formula: cell?.formula,
         computed: computeCell(tab.id, r, c, cache),
+        updatedAt: cell?.updatedAt,
+        updatedBy: cell?.updatedBy,
       });
     }
   }
@@ -294,18 +339,166 @@ app.put('/api/tabs/:tabId/cells', (req, res) => {
   const tab = store.getTab(req.params.tabId);
   if (!tab) return res.status(404).json({ error: 'tab not found' });
 
-  const { row, col, value, formula } = req.body as {
+  const { row, col, value, formula, baseUpdatedAt } = req.body as {
     row: number;
     col: number;
     value?: string;
     formula?: string;
+    baseUpdatedAt?: number | null;
   };
-  const data: CellData = { value: value ?? '', formula };
-  store.setCell(tab.id, row, col, data);
 
-  const cache = new Map<string, number>();
-  const computed = computeCell(tab.id, row, col, cache);
-  res.json({ row, col, ...data, computed });
+  if (
+    !Number.isInteger(row) ||
+    !Number.isInteger(col) ||
+    row < 0 ||
+    col < 0 ||
+    row >= tab.rows ||
+    col >= tab.cols
+  ) {
+    return res.status(400).json({ error: `row must be 0..${tab.rows - 1}, col must be 0..${tab.cols - 1}` });
+  }
+
+  // 동시 편집 충돌: 클라이언트가 불러온 뒤(baseUpdatedAt) 다른 사람이 이 셀을 먼저 고쳤으면 거절합니다.
+  const hasBase = Object.prototype.hasOwnProperty.call(req.body, 'baseUpdatedAt');
+  const currentMeta = store.getCellMeta(tab.id, row, col);
+  if (hasBase && currentMeta != null && (baseUpdatedAt == null || currentMeta > baseUpdatedAt)) {
+    const current = store.getCells(tab.id)[`${row}_${col}`];
+    const computed = computeCell(tab.id, row, col, new Map());
+    return res.status(409).json({
+      error: 'conflict',
+      current: {
+        row,
+        col,
+        value: current?.value ?? '',
+        formula: current?.formula,
+        computed,
+        updatedAt: currentMeta,
+        updatedBy: current?.updatedBy,
+      },
+    });
+  }
+
+  const data: CellData = { value: value ?? '', formula };
+  const updatedAt = store.recordAndSetCell(tab.id, row, col, data, getEditor(req));
+
+  const computed = computeCell(tab.id, row, col, new Map());
+  res.json({ row, col, ...data, computed, updatedAt, updatedBy: getEditor(req) });
+});
+
+app.get('/api/tabs/:tabId/history', (req, res) => {
+  const tab = store.getTab(req.params.tabId);
+  if (!tab) return res.status(404).json({ error: 'tab not found' });
+
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 30));
+  res.json(store.listHistory(tab.id, limit));
+});
+
+app.post('/api/tabs/:tabId/history/:id/revert', (req, res) => {
+  const tab = store.getTab(req.params.tabId);
+  if (!tab) return res.status(404).json({ error: 'tab not found' });
+
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'invalid history id' });
+
+  const result = store.revertCell(tab.id, id, getEditor(req));
+  if (!result.ok) {
+    if (result.reason === 'not_found') return res.status(404).json({ error: 'history entry not found' });
+    return res.status(409).json({ error: 'stale', message: '그 사이 다른 수정이 있어 되돌릴 수 없어요' });
+  }
+
+  const computed = computeCell(tab.id, result.row, result.col, new Map());
+  res.json({ ...result, computed });
+});
+
+// ── 메인화면: 기념일 / D-day ──────────────────────────────
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+app.get('/api/events', (_req, res) => {
+  res.json(store.listEvents());
+});
+
+app.post('/api/events', (req, res) => {
+  const { title, date } = req.body as { title?: string; date?: string };
+  if (!title || !title.trim()) return res.status(400).json({ error: 'title is required' });
+  if (!date || !DATE_RE.test(date)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  res.status(201).json(store.createEvent(title.trim(), date));
+});
+
+app.put('/api/events/:id', (req, res) => {
+  const { title, date } = req.body as { title?: string; date?: string };
+  if (title !== undefined && !title.trim()) return res.status(400).json({ error: 'title cannot be empty' });
+  if (date !== undefined && !DATE_RE.test(date)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  const updated = store.updateEvent(req.params.id, {
+    title: title?.trim(),
+    date,
+  });
+  if (!updated) return res.status(404).json({ error: 'event not found' });
+  res.json(updated);
+});
+
+app.delete('/api/events/:id', (req, res) => {
+  store.deleteEvent(req.params.id);
+  res.status(204).end();
+});
+
+// ── 공유 메모장 ─────────────────────────────────────────
+app.get('/api/memos', (_req, res) => {
+  res.json(store.listMemos());
+});
+
+app.post('/api/memos', (req, res) => {
+  const { title } = req.body as { title?: string };
+  if (!title || !title.trim()) return res.status(400).json({ error: 'title is required' });
+  res.status(201).json(store.createMemo(title.trim()));
+});
+
+app.get('/api/memos/:id', (req, res) => {
+  const memo = store.getMemo(req.params.id);
+  if (!memo) return res.status(404).json({ error: 'memo not found' });
+  res.json(memo);
+});
+
+app.put('/api/memos/:id', (req, res) => {
+  const { title, content, baseUpdatedAt } = req.body as {
+    title?: string;
+    content?: string;
+    baseUpdatedAt?: number | null;
+  };
+  if (title !== undefined && !title.trim()) return res.status(400).json({ error: 'title cannot be empty' });
+
+  const meta = store.getMemoMeta(req.params.id);
+  if (meta === null && !store.getMemo(req.params.id)) {
+    return res.status(404).json({ error: 'memo not found' });
+  }
+
+  // 동시 편집 충돌: 불러온 뒤 상대가 먼저 저장했으면 거절합니다.
+  const hasBase = Object.prototype.hasOwnProperty.call(req.body, 'baseUpdatedAt');
+  if (hasBase && meta != null && (baseUpdatedAt == null || meta > baseUpdatedAt)) {
+    const current = store.getMemo(req.params.id);
+    return res.status(409).json({
+      error: 'conflict',
+      current: {
+        id: current?.id,
+        title: current?.title,
+        content: current?.content,
+        updatedAt: current?.updatedAt,
+        updatedBy: current?.updatedBy,
+      },
+    });
+  }
+
+  const updated = store.updateMemo(
+    req.params.id,
+    { title: title?.trim(), content },
+    getEditor(req)
+  );
+  if (!updated) return res.status(404).json({ error: 'memo not found' });
+  res.json(updated);
+});
+
+app.delete('/api/memos/:id', (req, res) => {
+  store.deleteMemo(req.params.id);
+  res.status(204).end();
 });
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 4000;

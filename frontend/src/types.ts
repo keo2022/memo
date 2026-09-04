@@ -19,6 +19,41 @@ export interface CellInfo {
   value: string;
   formula?: string;
   computed: number;
+  updatedAt?: number;
+  updatedBy?: string;
+}
+
+export interface EventItem {
+  id: string;
+  title: string;
+  date: string; // 'YYYY-MM-DD'
+  order: number;
+}
+
+export interface MemoSummary {
+  id: string;
+  title: string;
+  order: number;
+  updatedAt?: number;
+  updatedBy?: string;
+}
+
+export interface Memo extends MemoSummary {
+  content: string;
+  createdAt: number;
+}
+
+export interface HistoryEntry {
+  id: number;
+  row: number;
+  col: number;
+  prevValue: string;
+  prevFormula?: string;
+  nextValue: string;
+  nextFormula?: string;
+  editor?: string;
+  kind: 'edit' | 'revert';
+  createdAt: number;
 }
 
 export type ColumnFormat = 'text' | 'checkbox' | 'number';

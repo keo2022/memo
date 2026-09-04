@@ -10,6 +10,7 @@ import type { RootStackParamList } from '../navigation/RootNavigator';
 import { api } from '../db/repository';
 import type { Sheet } from '../types';
 import { colors, radius, spacing, shadow, type, fonts } from '../theme';
+import { loadEditorName, saveEditorName, getCachedEditorName } from '../lib/identity';
 import ScreenHeader from '../components/ScreenHeader';
 import ItemActionModal from '../components/ItemActionModal';
 import NamePromptModal from '../components/NamePromptModal';
@@ -30,6 +31,14 @@ export default function SheetListScreen({ navigation }: Props) {
   const [addModalVisible, setAddModalVisible] = useState(false);
   const [listKey, setListKey] = useState(0);
   const [burst, setBurst] = useState(0);
+  const [editorName, setEditorName] = useState<string | null>(getCachedEditorName());
+  const [nameModalVisible, setNameModalVisible] = useState(false);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadEditorName().then(setEditorName);
+    }, [])
+  );
 
   const loadSheets = useCallback(async () => {
     try {
@@ -103,6 +112,19 @@ export default function SheetListScreen({ navigation }: Props) {
         subtitle={sheets.length > 0 ? `시트 ${sheets.length}개 ✨` : '결혼 준비를 시트로 차곡차곡'}
       />
 
+      <TouchableOpacity
+        style={styles.editorChip}
+        onPress={() => setNameModalVisible(true)}
+        hitSlop={8}
+        activeOpacity={0.7}
+      >
+        <Ionicons name="person-circle-outline" size={16} color={colors.primaryDark} />
+        <Text style={styles.editorChipText} numberOfLines={1}>
+          {editorName ? `${editorName} (편집 기록에 표시)` : '이름 설정하기'}
+        </Text>
+        <Ionicons name="chevron-forward" size={13} color={colors.textMuted} />
+      </TouchableOpacity>
+
       <DraggableFlatList
         key={listKey}
         data={sheets}
@@ -148,6 +170,17 @@ export default function SheetListScreen({ navigation }: Props) {
         onConfirm={handleAddSheet}
       />
 
+      <NamePromptModal
+        visible={nameModalVisible}
+        title="이름 바꾸기"
+        confirmLabel="저장"
+        onClose={() => setNameModalVisible(false)}
+        onConfirm={async (name) => {
+          await saveEditorName(name);
+          setEditorName(name.trim());
+        }}
+      />
+
       <ItemActionModal
         visible={!!actionTarget}
         itemName={actionTarget?.name ?? ''}
@@ -179,6 +212,21 @@ export default function SheetListScreen({ navigation }: Props) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
+  editorChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 5,
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.sm,
+    paddingVertical: 6,
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.pill,
+    backgroundColor: colors.primarySoft,
+    borderWidth: 1,
+    borderColor: colors.primarySoftBorder,
+  },
+  editorChipText: { fontSize: 12, fontFamily: fonts.semibold, color: colors.primaryDark, maxWidth: 240 },
   fabWrap: { position: 'absolute', right: spacing.lg, ...shadow.floating },
   fab: {
     flexDirection: 'row',
