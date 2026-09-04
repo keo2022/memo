@@ -3,7 +3,7 @@ import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, spacing, radius, shadow, type } from '../theme';
-import RingMascot from './mascot/RingMascot';
+import PeaMascot from './mascot/PeaMascot';
 
 interface Props {
   title: string;
@@ -30,7 +30,7 @@ export default function ScreenHeader({ title, subtitle, onBack, right, mascot = 
           </Text>
           {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
         </View>
-        {right ?? (mascot ? <RingMascot size={46} mood="wink" animated /> : null)}
+        {right ?? (mascot ? <PeaMascot size={46} mood="wink" animated /> : null)}
       </View>
     </View>
   );

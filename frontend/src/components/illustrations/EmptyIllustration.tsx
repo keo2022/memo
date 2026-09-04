@@ -1,7 +1,7 @@
 import React from 'react';
 import { View, StyleSheet } from 'react-native';
 import Svg, { Rect, Path, Circle, G, Line } from 'react-native-svg';
-import RingMascot, { MascotMood } from '../mascot/RingMascot';
+import PeaMascot, { MascotMood } from '../mascot/PeaMascot';
 import { colors } from '../../theme';
 
 type Variant = 'sheets' | 'tabs' | 'grid';
@@ -54,7 +54,7 @@ export default function EmptyIllustration({ variant, size = 150 }: Props) {
       </Svg>
 
       <View style={styles.mascot}>
-        <RingMascot size={size * 0.5} mood={MOOD[variant]} animated />
+        <PeaMascot size={size * 0.5} mood={MOOD[variant]} animated />
       </View>
     </View>
   );

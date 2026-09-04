@@ -7,8 +7,9 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api } from '../db/repository';
 import type { EventItem } from '../types';
 import { colors, radius, spacing, shadow, fonts, type } from '../theme';
-import RingMascot from '../components/mascot/RingMascot';
+import PeaMascot from '../components/mascot/PeaMascot';
 import EventEditModal from '../components/EventEditModal';
+import SettingsModal from '../components/SettingsModal';
 import { daysUntil, ddayLabel, formatKoreanDate } from '../lib/date';
 import { useReduceMotion } from '../hooks/useReduceMotion';
 
@@ -24,6 +25,7 @@ export default function HomeScreen() {
   const [loaded, setLoaded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [modal, setModal] = useState<ModalState>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -88,7 +90,17 @@ export default function HomeScreen() {
             <Text style={styles.hello}>우리 결혼 준비</Text>
             <Text style={styles.helloSub}>둘이 함께 채워가요</Text>
           </View>
-          <RingMascot size={52} mood="wink" animated />
+          <View style={styles.topRight}>
+            <TouchableOpacity
+              onPress={() => setSettingsOpen(true)}
+              hitSlop={10}
+              style={styles.gearButton}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="settings-outline" size={20} color={colors.textMuted} />
+            </TouchableOpacity>
+            <PeaMascot size={52} mood="wink" animated />
+          </View>
         </View>
 
         {hero ? (
@@ -173,6 +185,8 @@ export default function HomeScreen() {
         onSubmit={handleSubmit}
         onDelete={modal?.mode === 'edit' ? handleDelete : undefined}
       />
+
+      <SettingsModal visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </View>
   );
 }
@@ -188,6 +202,8 @@ const styles = StyleSheet.create({
   },
   hello: { ...type.display, fontSize: 26 },
   helloSub: { ...type.caption, marginTop: 4 },
+  topRight: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  gearButton: { padding: 4 },
   heroCard: {
     marginHorizontal: spacing.lg,
     borderRadius: radius.xl,

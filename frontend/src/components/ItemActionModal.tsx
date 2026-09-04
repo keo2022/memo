@@ -3,7 +3,7 @@ import { Modal, View, Text, TextInput, TouchableOpacity, StyleSheet, KeyboardAvo
 import { Ionicons } from '@expo/vector-icons';
 import Animated, { BounceIn } from 'react-native-reanimated';
 import { colors, radius, spacing, shadow, fonts, type } from '../theme';
-import RingMascot, { MascotMood } from './mascot/RingMascot';
+import PeaMascot, { MascotMood } from './mascot/PeaMascot';
 import Squishy from './Squishy';
 import { useReduceMotion } from '../hooks/useReduceMotion';
 
@@ -76,7 +76,7 @@ export default function ItemActionModal({
       <KeyboardAvoidingView style={styles.backdrop} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <Animated.View key={mode} entering={reduceMotion ? undefined : BounceIn} style={styles.card}>
           <View style={styles.mascotWrap}>
-            <RingMascot size={62} mood={MOOD[mode]} animated />
+            <PeaMascot size={62} mood={MOOD[mode]} animated />
           </View>
           <TouchableOpacity onPress={handleClose} hitSlop={8} style={styles.close}>
             <Ionicons name="close" size={22} color={colors.textMuted} />

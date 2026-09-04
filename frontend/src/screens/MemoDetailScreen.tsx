@@ -1,4 +1,4 @@
-import React, { useCallback, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -25,6 +25,7 @@ import { relativeTime } from '../lib/date';
 type Props = NativeStackScreenProps<MemoStackParamList, 'MemoDetail'>;
 
 const POLL_INTERVAL_MS = 15000;
+const AUTOSAVE_DELAY_MS = 1500;
 
 export default function MemoDetailScreen({ route, navigation }: Props) {
   const { memoId } = route.params;
@@ -59,6 +60,9 @@ export default function MemoDetailScreen({ route, navigation }: Props) {
     [memoId, applyMemo]
   );
 
+  // 자동 저장이 항상 최신 content를 저장하도록, 화면을 벗어날 때 쓰는 참조를 최신으로 유지합니다.
+  const saveRef = useRef<() => void>(() => {});
+
   useFocusEffect(
     useCallback(() => {
       // 편집 중이면 초안을 지키고, 아니면 서버 내용으로 맞춥니다. 폴링도 편집 중이 아닐 때만.
@@ -66,17 +70,24 @@ export default function MemoDetailScreen({ route, navigation }: Props) {
       const id = setInterval(() => {
         if (!dirtyRef.current) load(false);
       }, POLL_INTERVAL_MS);
-      return () => clearInterval(id);
+      return () => {
+        clearInterval(id);
+        saveRef.current(); // 화면을 벗어날 때 저장 안 된 변경을 마저 저장 (save가 dirty 아니면 무시)
+      };
     }, [load])
   );
 
   const save = useCallback(async () => {
     if (saving || !dirty) return;
+    // 저장 중에도 사용자가 계속 입력할 수 있으므로, "지금 보낸 내용"만 저장됨으로 표시합니다.
+    // (서버 응답으로 content를 되돌리면 그 사이 입력한 글자가 사라집니다.)
+    const sent = content;
     setSaving(true);
     try {
-      const updated = await api.updateMemo(memoId, { content }, baseUpdatedAt);
-      applyMemo(updated, false);
-      setContent(updated.content);
+      const updated = await api.updateMemo(memoId, { content: sent }, baseUpdatedAt);
+      setMemo(updated);
+      setSavedContent(sent);
+      setBaseUpdatedAt(updated.updatedAt ?? null);
     } catch (e) {
       if (e instanceof ConflictError) {
         setConflict(e.current as MemoConflictCurrent);
@@ -86,17 +97,28 @@ export default function MemoDetailScreen({ route, navigation }: Props) {
     } finally {
       setSaving(false);
     }
-  }, [saving, dirty, memoId, content, baseUpdatedAt, applyMemo]);
+  }, [saving, dirty, memoId, content, baseUpdatedAt]);
+
+  saveRef.current = save;
+
+  // 자동 저장: 입력을 멈추고 잠시 지나면 저장합니다. 충돌 모달이 떠 있으면 건드리지 않습니다.
+  useEffect(() => {
+    if (!dirty || saving || conflict) return;
+    const t = setTimeout(() => saveRef.current(), AUTOSAVE_DELAY_MS);
+    return () => clearTimeout(t);
+  }, [content, dirty, saving, conflict]);
 
   const overwriteWithMine = async () => {
     const c = conflict;
     setConflict(null);
     if (!c) return;
+    const sent = content;
     setSaving(true);
     try {
-      const updated = await api.updateMemo(memoId, { content }, c.updatedAt ?? null);
-      applyMemo(updated, false);
-      setContent(updated.content);
+      const updated = await api.updateMemo(memoId, { content: sent }, c.updatedAt ?? null);
+      setMemo(updated);
+      setSavedContent(sent);
+      setBaseUpdatedAt(updated.updatedAt ?? null);
     } catch (e) {
       if (e instanceof ConflictError) setConflict(e.current as MemoConflictCurrent);
       else Alert.alert('저장 실패', String(e));
@@ -170,15 +192,6 @@ export default function MemoDetailScreen({ route, navigation }: Props) {
         />
       </ScrollView>
 
-      {dirty && !saving && (
-        <View style={styles.dirtyBar}>
-          <Text style={styles.dirtyText}>저장하지 않은 변경이 있어요</Text>
-          <TouchableOpacity onPress={save} style={styles.dirtyBarButton}>
-            <Text style={styles.dirtyBarButtonText}>저장</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-
       <Modal visible={!!conflict} transparent animationType="fade" onRequestClose={() => setConflict(null)}>
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
@@ -227,29 +240,6 @@ const styles = StyleSheet.create({
   saveButton: { color: colors.primaryDark, fontFamily: fonts.bold, fontSize: 15 },
   savedWrap: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   savedText: { color: colors.textMuted, fontFamily: fonts.semibold, fontSize: 12 },
-  dirtyBar: {
-    position: 'absolute',
-    left: spacing.lg,
-    right: spacing.lg,
-    bottom: spacing.lg,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: colors.textPrimary,
-    borderRadius: radius.pill,
-    paddingLeft: spacing.lg,
-    paddingRight: spacing.xs,
-    paddingVertical: spacing.xs,
-    ...shadow.floating,
-  },
-  dirtyText: { color: colors.white, fontSize: 13, fontFamily: fonts.medium },
-  dirtyBarButton: {
-    backgroundColor: colors.primary,
-    borderRadius: radius.pill,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: 9,
-  },
-  dirtyBarButtonText: { color: colors.white, fontFamily: fonts.bold, fontSize: 13 },
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(58,46,48,0.4)', alignItems: 'center', justifyContent: 'center' },
   modalCard: { width: '86%', backgroundColor: colors.surface, borderRadius: radius.xl, padding: spacing.lg, ...shadow.floating },
   modalTitle: { fontSize: 17, fontFamily: fonts.bold, color: colors.textPrimary, marginBottom: spacing.sm },

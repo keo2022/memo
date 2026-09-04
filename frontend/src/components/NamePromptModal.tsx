@@ -3,7 +3,7 @@ import { Modal, View, Text, TextInput, TouchableOpacity, StyleSheet, KeyboardAvo
 import { Ionicons } from '@expo/vector-icons';
 import Animated, { BounceIn } from 'react-native-reanimated';
 import { colors, radius, spacing, shadow, fonts, type } from '../theme';
-import RingMascot from './mascot/RingMascot';
+import PeaMascot from './mascot/PeaMascot';
 import Squishy from './Squishy';
 import { useReduceMotion } from '../hooks/useReduceMotion';
 
@@ -54,7 +54,7 @@ export default function NamePromptModal({ visible, title, placeholder, confirmLa
           style={styles.card}
         >
           <View style={styles.mascotWrap}>
-            <RingMascot size={62} mood="excited" animated />
+            <PeaMascot size={62} mood="excited" animated />
           </View>
           <TouchableOpacity onPress={handleClose} hitSlop={8} style={styles.close}>
             <Ionicons name="close" size={22} color={colors.textMuted} />

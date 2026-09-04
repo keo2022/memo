@@ -39,7 +39,7 @@ export default function App() {
         <RootNavigator />
         <NamePromptModal
           visible={askName}
-          title="이름을 알려주세요"
+          title="별명을 정해주세요"
           confirmLabel="시작"
           onClose={() => setAskName(false)}
           onConfirm={async (name) => {
