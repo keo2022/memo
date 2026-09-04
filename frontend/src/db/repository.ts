@@ -7,6 +7,7 @@ import {
   Merge,
   HistoryEntry,
   EventItem,
+  EventLink,
   MemoSummary,
   Memo,
 } from '../types';
@@ -191,8 +192,10 @@ export const api = {
   },
 
   // ── 메인화면: 기념일 / D-day ──
-  getEvents(): Promise<EventItem[]> {
-    return request('/api/events');
+  async getEvents(): Promise<EventItem[]> {
+    // 서버 버전이 낮아 links가 없을 수도 있어 항상 배열로 맞춰줍니다.
+    const list = await request<EventItem[]>('/api/events');
+    return list.map((e) => ({ ...e, links: e.links ?? [] }));
   },
 
   createEvent(title: string, date: string): Promise<EventItem> {
@@ -205,6 +208,10 @@ export const api = {
 
   deleteEvent(id: string): Promise<void> {
     return request(`/api/events/${id}`, { method: 'DELETE' });
+  },
+
+  setEventLinks(id: string, links: EventLink[]): Promise<EventItem> {
+    return request(`/api/events/${id}/links`, { method: 'PUT', body: JSON.stringify({ links }) });
   },
 
   // ── 공유 메모장 ──

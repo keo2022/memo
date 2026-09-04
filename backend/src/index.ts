@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { store } from './data/store';
 import { evaluateFormula } from './formula/evaluate';
-import { CellData, ColumnFormat, Merge } from './types';
+import { CellData, ColumnFormat, Merge, EventLink } from './types';
 
 const COLUMN_FORMATS: ColumnFormat[] = ['text', 'checkbox', 'number'];
 
@@ -439,6 +439,27 @@ app.put('/api/events/:id', (req, res) => {
 app.delete('/api/events/:id', (req, res) => {
   store.deleteEvent(req.params.id);
   res.status(204).end();
+});
+
+const LINK_KINDS = ['memo', 'sheet'];
+
+// 기념일 하나에 연결된 메모/엑셀시트 목록을 통째로 교체합니다.
+app.put('/api/events/:id/links', (req, res) => {
+  if (!store.getEvent(req.params.id)) return res.status(404).json({ error: 'event not found' });
+
+  const { links } = req.body as { links?: { kind?: string; refId?: string }[] };
+  if (!Array.isArray(links)) return res.status(400).json({ error: 'links must be an array' });
+
+  const clean: EventLink[] = [];
+  for (const l of links) {
+    if (!l || !LINK_KINDS.includes(l.kind ?? '') || typeof l.refId !== 'string' || !l.refId.trim()) {
+      return res.status(400).json({ error: 'each link needs kind (memo|sheet) and refId' });
+    }
+    clean.push({ kind: l.kind as 'memo' | 'sheet', refId: l.refId });
+  }
+
+  store.setEventLinks(req.params.id, clean);
+  res.json(store.getEvent(req.params.id));
 });
 
 // ── 공유 메모장 ─────────────────────────────────────────

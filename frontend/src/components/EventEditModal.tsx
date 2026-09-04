@@ -91,7 +91,7 @@ export default function EventEditModal({
       <KeyboardAvoidingView style={styles.backdrop} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <View style={styles.card}>
           <View style={styles.header}>
-            <Text style={styles.title}>{mode === 'create' ? '기념일 추가' : '기념일 수정'}</Text>
+            <Text style={styles.title}>{mode === 'create' ? '날짜 추가' : '날짜 수정'}</Text>
             <TouchableOpacity onPress={onClose} hitSlop={8} disabled={busy}>
               <Ionicons name="close" size={22} color={colors.textMuted} />
             </TouchableOpacity>

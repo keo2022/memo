@@ -2,12 +2,13 @@ import React, { useCallback, useMemo, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, ScrollView, RefreshControl, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import Animated, { FadeInDown } from 'react-native-reanimated';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api } from '../db/repository';
-import type { EventItem } from '../types';
+import type { EventItem, EventLink, MemoSummary, Sheet } from '../types';
 import { colors, radius, spacing, shadow, fonts, type } from '../theme';
 import EventEditModal from '../components/EventEditModal';
+import EventLinkModal from '../components/EventLinkModal';
 import SettingsModal from '../components/SettingsModal';
 import { daysUntil, ddayLabel, formatKoreanDate, todayLabel } from '../lib/date';
 import { useReduceMotion } from '../hooks/useReduceMotion';
@@ -19,16 +20,23 @@ type ModalState =
 
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
+  const navigation = useNavigation<any>();
   const reduceMotion = useReduceMotion();
   const [events, setEvents] = useState<EventItem[]>([]);
+  const [memos, setMemos] = useState<MemoSummary[]>([]);
+  const [sheets, setSheets] = useState<Sheet[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [modal, setModal] = useState<ModalState>(null);
+  const [linkTarget, setLinkTarget] = useState<EventItem | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      setEvents(await api.getEvents());
+      const [ev, me, sh] = await Promise.all([api.getEvents(), api.getMemos(), api.getSheets()]);
+      setEvents(ev);
+      setMemos(me);
+      setSheets(sh);
     } catch (e) {
       Alert.alert('불러오지 못했습니다', String(e));
     } finally {
@@ -74,6 +82,64 @@ export default function HomeScreen() {
     await load();
   };
 
+  const handleSaveLinks = async (links: EventLink[]) => {
+    if (!linkTarget) return;
+    await api.setEventLinks(linkTarget.id, links);
+    await load();
+  };
+
+  // 연결된 항목의 현재 이름. 삭제됐으면 null.
+  const linkLabel = useCallback(
+    (link: EventLink): string | null => {
+      if (link.kind === 'memo') return memos.find((m) => m.id === link.refId)?.title ?? null;
+      return sheets.find((s) => s.id === link.refId)?.name ?? null;
+    },
+    [memos, sheets]
+  );
+
+  const openLink = useCallback(
+    (link: EventLink) => {
+      if (link.kind === 'memo') {
+        const m = memos.find((x) => x.id === link.refId);
+        if (!m) return Alert.alert('메모를 찾을 수 없어요', '삭제되었을 수 있어요.');
+        navigation.navigate('Memo', { screen: 'MemoDetail', params: { memoId: m.id, memoTitle: m.title } });
+      } else {
+        const s = sheets.find((x) => x.id === link.refId);
+        if (!s) return Alert.alert('시트를 찾을 수 없어요', '삭제되었을 수 있어요.');
+        navigation.navigate('Excel', { screen: 'TabDetail', params: { sheetId: s.id, sheetName: s.name } });
+      }
+    },
+    [memos, sheets, navigation]
+  );
+
+  const renderChips = (event: EventItem, center: boolean) => {
+    const items = (event.links ?? [])
+      .map((link) => ({ link, label: linkLabel(link) }))
+      .filter((x): x is { link: EventLink; label: string } => x.label !== null);
+    if (items.length === 0) return null;
+    return (
+      <View style={[styles.chipRow, center && styles.chipRowCenter]}>
+        {items.map(({ link, label }) => (
+          <TouchableOpacity
+            key={link.kind + link.refId}
+            style={styles.chip}
+            activeOpacity={0.7}
+            onPress={() => openLink(link)}
+          >
+            <Ionicons
+              name={link.kind === 'memo' ? 'document-text' : 'grid'}
+              size={12}
+              color={colors.primaryDark}
+            />
+            <Text style={styles.chipText} numberOfLines={1}>
+              {label}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+    );
+  };
+
   const heroDiff = hero ? daysUntil(hero.date) : 0;
 
   return (
@@ -102,6 +168,8 @@ export default function HomeScreen() {
               activeOpacity={0.9}
               style={styles.heroCard}
               onPress={() => setModal({ mode: 'edit', event: hero })}
+              onLongPress={() => setLinkTarget(hero)}
+              delayLongPress={300}
             >
               <Text style={styles.heroLabel}>{hero.title}</Text>
               <Text style={styles.heroDday}>{ddayLabel(hero.date)}</Text>
@@ -116,15 +184,20 @@ export default function HomeScreen() {
                       : `${-heroDiff}일 지났어요`}
                 </Text>
               </View>
+              {(hero.links ?? []).length > 0 ? (
+                renderChips(hero, true)
+              ) : (
+                <Text style={styles.heroHint}>꾹 누르면 메모·엑셀을 연결할 수 있어요</Text>
+              )}
             </TouchableOpacity>
           </Animated.View>
         ) : (
           <View style={styles.emptyCard}>
             <Text style={styles.emptyTitle}>날짜를 등록해보세요</Text>
-            <Text style={styles.emptyText}>결혼식, 상견례, 기념일 같은 날을 더하면{'\n'}여기서 D-day로 볼 수 있어요</Text>
+            <Text style={styles.emptyText}>결혼식, 상견례 같은 날을 더하면{'\n'}여기서 D-day로 볼 수 있어요</Text>
             <TouchableOpacity style={styles.emptyCta} onPress={() => setModal({ mode: 'create' })}>
               <Ionicons name="add" size={18} color={colors.white} />
-              <Text style={styles.emptyCtaText}>기념일 추가</Text>
+              <Text style={styles.emptyCtaText}>추가</Text>
             </TouchableOpacity>
           </View>
         )}
@@ -133,13 +206,14 @@ export default function HomeScreen() {
           <View style={styles.listSection}>
             <Text style={styles.sectionTitle}>다른 날들</Text>
             {rest.map((e) => {
-              const diff = daysUntil(e.date);
               return (
                 <TouchableOpacity
                   key={e.id}
                   style={styles.row}
                   activeOpacity={0.8}
                   onPress={() => setModal({ mode: 'edit', event: e })}
+                  onLongPress={() => setLinkTarget(e)}
+                  delayLongPress={300}
                 >
                   <View style={styles.rowDdayWrap}>
                     <Text style={styles.rowDday}>{ddayLabel(e.date)}</Text>
@@ -149,6 +223,7 @@ export default function HomeScreen() {
                       {e.title}
                     </Text>
                     <Text style={styles.rowDate}>{formatKoreanDate(e.date)}</Text>
+                    {renderChips(e, false)}
                   </View>
                   <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
                 </TouchableOpacity>
@@ -165,7 +240,7 @@ export default function HomeScreen() {
           activeOpacity={0.85}
         >
           <Ionicons name="add" size={20} color={colors.white} />
-          <Text style={styles.fabText}>기념일</Text>
+          <Text style={styles.fabText}>추가</Text>
         </TouchableOpacity>
       )}
 
@@ -177,6 +252,15 @@ export default function HomeScreen() {
         onClose={() => setModal(null)}
         onSubmit={handleSubmit}
         onDelete={modal?.mode === 'edit' ? handleDelete : undefined}
+      />
+
+      <EventLinkModal
+        visible={linkTarget !== null}
+        event={linkTarget}
+        memos={memos}
+        sheets={sheets}
+        onClose={() => setLinkTarget(null)}
+        onSave={handleSaveLinks}
       />
 
       <SettingsModal visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
@@ -211,6 +295,7 @@ const styles = StyleSheet.create({
   heroDate: { fontSize: 14, fontFamily: fonts.medium, color: colors.textSecondary, marginTop: spacing.sm },
   heroFootRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: spacing.md },
   heroFoot: { fontSize: 13, fontFamily: fonts.bold, color: colors.primaryDark },
+  heroHint: { fontSize: 11, fontFamily: fonts.medium, color: colors.textMuted, marginTop: spacing.md },
   emptyCard: {
     marginHorizontal: spacing.lg,
     borderRadius: radius.xl,
@@ -261,6 +346,21 @@ const styles = StyleSheet.create({
   rowTextWrap: { flex: 1 },
   rowTitle: { ...type.headline, fontSize: 15 },
   rowDate: { ...type.caption, marginTop: 2 },
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, marginTop: spacing.sm },
+  chipRowCenter: { justifyContent: 'center' },
+  chip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    maxWidth: 180,
+    paddingVertical: 5,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radius.pill,
+    backgroundColor: colors.primarySoft,
+    borderWidth: 1,
+    borderColor: colors.primarySoftBorder,
+  },
+  chipText: { fontSize: 12, fontFamily: fonts.bold, color: colors.primaryDark },
   fab: {
     position: 'absolute',
     right: spacing.lg,

@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import Database from 'better-sqlite3';
-import { Sheet, Tab, CellData, ColumnFormat, Merge, HistoryEntry, EventItem, MemoSummary, Memo } from '../types';
+import { Sheet, Tab, CellData, ColumnFormat, Merge, HistoryEntry, EventItem, EventLink, MemoSummary, Memo } from '../types';
 import { shiftFormulaRefs } from '../formula/shiftRefs';
 
 // 클라우드에 영구 디스크(volume)를 붙였다면 DB_PATH 환경변수로 그 경로를 가리키게 하세요.
@@ -132,6 +132,13 @@ db.exec(`
     updated_at INTEGER,
     updated_by TEXT
   );
+  CREATE TABLE IF NOT EXISTS event_links (
+    event_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    ref_id TEXT NOT NULL,
+    PRIMARY KEY (event_id, kind, ref_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_event_links_event ON event_links (event_id);
 `);
 
 // tabs에 order_num 컬럼을 나중에 추가했습니다. 기존 탭들은 sheet별로 rowid(생성 순서) 기준으로 순번을 매겨줍니다.
@@ -276,6 +283,7 @@ export const store = {
   deleteSheet(sheetId: string) {
     store.listTabs(sheetId).forEach((t) => store.deleteTab(t.id));
     db.prepare('DELETE FROM sheets WHERE id = ?').run(sheetId);
+    db.prepare("DELETE FROM event_links WHERE kind = 'sheet' AND ref_id = ?").run(sheetId);
   },
 
   listTabs(sheetId: string): Tab[] {
@@ -770,14 +778,34 @@ export const store = {
     const rows = db
       .prepare('SELECT id, title, date, order_num FROM events ORDER BY date ASC, order_num ASC')
       .all() as unknown as { id: string; title: string; date: string; order_num: number }[];
-    return rows.map((r) => ({ id: r.id, title: r.title, date: r.date, order: r.order_num }));
+    const linkRows = db
+      .prepare('SELECT event_id, kind, ref_id FROM event_links')
+      .all() as unknown as { event_id: string; kind: string; ref_id: string }[];
+    const byEvent = new Map<string, EventLink[]>();
+    linkRows.forEach((r) => {
+      if (r.kind !== 'memo' && r.kind !== 'sheet') return;
+      const list = byEvent.get(r.event_id) ?? [];
+      list.push({ kind: r.kind, refId: r.ref_id });
+      byEvent.set(r.event_id, list);
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      title: r.title,
+      date: r.date,
+      order: r.order_num,
+      links: byEvent.get(r.id) ?? [],
+    }));
+  },
+
+  getEvent(id: string): EventItem | undefined {
+    return store.listEvents().find((e) => e.id === id);
   },
 
   createEvent(title: string, date: string): EventItem {
     const { c } = db.prepare('SELECT COUNT(*) as c FROM events').get() as unknown as { c: number };
     const id = randomUUID();
     db.prepare('INSERT INTO events (id, title, date, order_num) VALUES (?, ?, ?, ?)').run(id, title, date, c);
-    return { id, title, date, order: c };
+    return { id, title, date, order: c, links: [] };
   },
 
   updateEvent(id: string, patch: { title?: string; date?: string }): EventItem | undefined {
@@ -788,11 +816,35 @@ export const store = {
     const title = patch.title ?? existing.title;
     const date = patch.date ?? existing.date;
     db.prepare('UPDATE events SET title = ?, date = ? WHERE id = ?').run(title, date, id);
-    return { id, title, date, order: existing.order_num };
+    return { id, title, date, order: existing.order_num, links: store.getEventLinks(id) };
   },
 
   deleteEvent(id: string) {
     db.prepare('DELETE FROM events WHERE id = ?').run(id);
+    db.prepare('DELETE FROM event_links WHERE event_id = ?').run(id);
+  },
+
+  getEventLinks(eventId: string): EventLink[] {
+    const rows = db
+      .prepare('SELECT kind, ref_id FROM event_links WHERE event_id = ?')
+      .all(eventId) as unknown as { kind: string; ref_id: string }[];
+    return rows
+      .filter((r) => r.kind === 'memo' || r.kind === 'sheet')
+      .map((r) => ({ kind: r.kind as 'memo' | 'sheet', refId: r.ref_id }));
+  },
+
+  // 기념일에 연결된 메모/시트 목록을 통째로 교체합니다.
+  setEventLinks(eventId: string, links: EventLink[]) {
+    db.exec('BEGIN');
+    try {
+      db.prepare('DELETE FROM event_links WHERE event_id = ?').run(eventId);
+      const ins = db.prepare('INSERT OR IGNORE INTO event_links (event_id, kind, ref_id) VALUES (?, ?, ?)');
+      links.forEach((l) => ins.run(eventId, l.kind, l.refId));
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
   },
 
   // ── 공유 메모장 ─────────────────────────────────────────
@@ -882,5 +934,6 @@ export const store = {
 
   deleteMemo(id: string) {
     db.prepare('DELETE FROM memos WHERE id = ?').run(id);
+    db.prepare("DELETE FROM event_links WHERE kind = 'memo' AND ref_id = ?").run(id);
   },
 };

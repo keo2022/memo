@@ -23,11 +23,18 @@ export interface CellInfo {
   updatedBy?: string;
 }
 
+// 기념일에 연결한 메모/엑셀시트. refId는 각각 memo.id / sheet.id.
+export interface EventLink {
+  kind: 'memo' | 'sheet';
+  refId: string;
+}
+
 export interface EventItem {
   id: string;
   title: string;
   date: string; // 'YYYY-MM-DD'
   order: number;
+  links: EventLink[];
 }
 
 export interface MemoSummary {
