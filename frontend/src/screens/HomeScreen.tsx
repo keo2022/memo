@@ -1,5 +1,14 @@
-import React, { useCallback, useMemo, useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, ScrollView, RefreshControl, Alert } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  ScrollView,
+  RefreshControl,
+  ActivityIndicator,
+  Alert,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
@@ -7,10 +16,14 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api } from '../db/repository';
 import type { EventItem, EventLink, MemoSummary, Sheet } from '../types';
 import { colors, radius, spacing, shadow, fonts, type } from '../theme';
-import EventEditModal from '../components/EventEditModal';
+import EventEditModal, { type EventFormValue } from '../components/EventEditModal';
+import EventDetailModal from '../components/EventDetailModal';
 import EventLinkModal from '../components/EventLinkModal';
+import PastEventsModal from '../components/PastEventsModal';
 import SettingsModal from '../components/SettingsModal';
-import { daysUntil, ddayLabel, formatKoreanDate, todayLabel } from '../lib/date';
+import { daysUntil, ddayLabel, formatKoreanDate, formatKoreanTime, todayLabel } from '../lib/date';
+import { friendlyMessage } from '../lib/errors';
+import { syncEventReminders } from '../lib/notifications';
 import { useReduceMotion } from '../hooks/useReduceMotion';
 
 type ModalState =
@@ -29,7 +42,12 @@ export default function HomeScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [modal, setModal] = useState<ModalState>(null);
   const [linkTarget, setLinkTarget] = useState<EventItem | null>(null);
+  const [detailTarget, setDetailTarget] = useState<EventItem | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [pastOpen, setPastOpen] = useState(false);
+  const [notifRev, setNotifRev] = useState(0);
+
+  const [loadError, setLoadError] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -37,8 +55,10 @@ export default function HomeScreen() {
       setEvents(ev);
       setMemos(me);
       setSheets(sh);
+      setLoadError(false);
     } catch (e) {
-      Alert.alert('불러오지 못했습니다', String(e));
+      setLoadError(true);
+      Alert.alert('불러오지 못했어요', friendlyMessage(e));
     } finally {
       setLoaded(true);
     }
@@ -59,19 +79,58 @@ export default function HomeScreen() {
     }
   }, [load]);
 
-  // 서버가 날짜 오름차순으로 줍니다. 오늘 이후 중 가장 가까운 것을 대표로, 없으면 마지막(가장 최근 과거).
-  const hero = useMemo(() => {
-    if (events.length === 0) return null;
-    return events.find((e) => daysUntil(e.date) >= 0) ?? events[events.length - 1];
-  }, [events]);
+  // 일정이 바뀌거나(서버에서 새로 받아옴) 알림 설정을 바꾸면 로컬 알림을 다시 예약합니다.
+  useEffect(() => {
+    if (loaded) syncEventReminders(events).catch(() => {});
+  }, [events, notifRev, loaded]);
 
-  const rest = useMemo(() => events.filter((e) => e.id !== hero?.id), [events, hero]);
+  // 앱을 켜 둔 채 자정이 지나도 D-day가 하루 밀리도록, 날짜가 바뀌는 시점에 한 번 리렌더합니다.
+  const [dayTick, setDayTick] = useState(0);
+  useEffect(() => {
+    const now = new Date();
+    const nextMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 5).getTime();
+    const timer = setTimeout(() => setDayTick((n) => n + 1), Math.max(1000, nextMidnight - now.getTime()));
+    return () => clearTimeout(timer);
+  }, [dayTick]);
 
-  const handleSubmit = async (title: string, date: string) => {
+  // 서버가 pinned 먼저, 그다음 날짜 오름차순으로 줍니다.
+  // 고정한 일정은 공지처럼 항상 위에, 나머지는 아직 안 지난 일정만 메인에 보이고 지난 건 따로 모달로.
+  const pinned = useMemo(() => events.filter((e) => e.pinned), [events]);
+  const upcoming = useMemo(
+    () => events.filter((e) => !e.pinned && daysUntil(e.date) >= 0),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [events, dayTick]
+  );
+  const past = useMemo(
+    () => events.filter((e) => !e.pinned && daysUntil(e.date) < 0),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [events, dayTick]
+  );
+
+  const hero = useMemo(() => pinned[0] ?? upcoming[0] ?? null, [pinned, upcoming]);
+  const rest = useMemo(
+    () => [...pinned, ...upcoming].filter((e) => e.id !== hero?.id),
+    [pinned, upcoming, hero]
+  );
+
+  // 상세 모달은 스냅샷 대신 최신 events에서 다시 찾아 보여줍니다(수정 후에도 최신 유지).
+  const detailEvent = useMemo(
+    () => (detailTarget ? events.find((e) => e.id === detailTarget.id) ?? detailTarget : null),
+    [detailTarget, events]
+  );
+
+  const handleSubmit = async (v: EventFormValue) => {
     if (modal?.mode === 'edit') {
-      await api.updateEvent(modal.event.id, { title, date });
+      await api.updateEvent(modal.event.id, {
+        title: v.title,
+        date: v.date,
+        pinned: v.pinned,
+        time: v.time,
+        location: v.location,
+        note: v.note,
+      });
     } else {
-      await api.createEvent(title, date);
+      await api.createEvent(v);
     }
     await load();
   };
@@ -162,18 +221,43 @@ export default function HomeScreen() {
           </TouchableOpacity>
         </View>
 
-        {hero ? (
+        {!loaded ? (
+          <ActivityIndicator color={colors.primary} style={{ marginTop: spacing.xxl * 2 }} />
+        ) : loadError && events.length === 0 ? (
+          <View style={styles.emptyCard}>
+            <Text style={styles.emptyTitle}>불러오지 못했어요</Text>
+            <Text style={styles.emptyText}>{'인터넷 연결을 확인하고\n다시 시도해주세요'}</Text>
+            <TouchableOpacity style={styles.emptyCta} onPress={load}>
+              <Ionicons name="refresh" size={18} color={colors.white} />
+              <Text style={styles.emptyCtaText}>다시 시도</Text>
+            </TouchableOpacity>
+          </View>
+        ) : hero ? (
           <Animated.View entering={reduceMotion ? undefined : FadeInDown.springify().damping(16)}>
             <TouchableOpacity
               activeOpacity={0.9}
               style={styles.heroCard}
-              onPress={() => setModal({ mode: 'edit', event: hero })}
+              onPress={() => setDetailTarget(hero)}
               onLongPress={() => setLinkTarget(hero)}
               delayLongPress={300}
             >
-              <Text style={styles.heroLabel}>{hero.title}</Text>
+              <View style={styles.heroLabelRow}>
+                {hero.pinned && <Ionicons name="pin" size={13} color={colors.primaryDark} />}
+                <Text style={styles.heroLabel}>{hero.title}</Text>
+              </View>
               <Text style={styles.heroDday}>{ddayLabel(hero.date)}</Text>
-              <Text style={styles.heroDate}>{formatKoreanDate(hero.date)}</Text>
+              <Text style={styles.heroDate}>
+                {formatKoreanDate(hero.date)}
+                {hero.time ? ` · ${formatKoreanTime(hero.time)}` : ''}
+              </Text>
+              {!!hero.location && (
+                <View style={styles.heroMetaRow}>
+                  <Ionicons name="location-outline" size={13} color={colors.textSecondary} />
+                  <Text style={styles.heroMetaText} numberOfLines={1}>
+                    {hero.location}
+                  </Text>
+                </View>
+              )}
               <View style={styles.heroFootRow}>
                 <Ionicons name="heart" size={13} color={colors.primaryDark} />
                 <Text style={styles.heroFoot}>
@@ -193,8 +277,14 @@ export default function HomeScreen() {
           </Animated.View>
         ) : (
           <View style={styles.emptyCard}>
-            <Text style={styles.emptyTitle}>날짜를 등록해보세요</Text>
-            <Text style={styles.emptyText}>결혼식, 상견례 같은 날을 더하면{'\n'}여기서 D-day로 볼 수 있어요</Text>
+            <Text style={styles.emptyTitle}>
+              {past.length > 0 ? '다가오는 일정이 없어요' : '날짜를 등록해보세요'}
+            </Text>
+            <Text style={styles.emptyText}>
+              {past.length > 0
+                ? '지난 일정은 아래에서 볼 수 있어요\n새 날짜를 더해보세요'
+                : '결혼식, 상견례 같은 날을 더하면\n여기서 D-day로 볼 수 있어요'}
+            </Text>
             <TouchableOpacity style={styles.emptyCta} onPress={() => setModal({ mode: 'create' })}>
               <Ionicons name="add" size={18} color={colors.white} />
               <Text style={styles.emptyCtaText}>추가</Text>
@@ -211,18 +301,25 @@ export default function HomeScreen() {
                   key={e.id}
                   style={styles.row}
                   activeOpacity={0.8}
-                  onPress={() => setModal({ mode: 'edit', event: e })}
+                  onPress={() => setDetailTarget(e)}
                   onLongPress={() => setLinkTarget(e)}
                   delayLongPress={300}
                 >
-                  <View style={styles.rowDdayWrap}>
+                  <View style={[styles.rowDdayWrap, e.pinned && styles.rowDdayWrapPinned]}>
                     <Text style={styles.rowDday}>{ddayLabel(e.date)}</Text>
                   </View>
                   <View style={styles.rowTextWrap}>
-                    <Text style={styles.rowTitle} numberOfLines={1}>
-                      {e.title}
+                    <View style={styles.rowTitleRow}>
+                      {e.pinned && <Ionicons name="pin" size={12} color={colors.primaryDark} />}
+                      <Text style={styles.rowTitle} numberOfLines={1}>
+                        {e.title}
+                      </Text>
+                    </View>
+                    <Text style={styles.rowDate} numberOfLines={1}>
+                      {formatKoreanDate(e.date)}
+                      {e.time ? ` · ${formatKoreanTime(e.time)}` : ''}
+                      {e.location ? ` · ${e.location}` : ''}
                     </Text>
-                    <Text style={styles.rowDate}>{formatKoreanDate(e.date)}</Text>
                     {renderChips(e, false)}
                   </View>
                   <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
@@ -230,6 +327,18 @@ export default function HomeScreen() {
               );
             })}
           </View>
+        )}
+
+        {past.length > 0 && (
+          <TouchableOpacity
+            style={styles.pastButton}
+            activeOpacity={0.7}
+            onPress={() => setPastOpen(true)}
+          >
+            <Ionicons name="time-outline" size={15} color={colors.textSecondary} />
+            <Text style={styles.pastButtonText}>지난 일정 {past.length}개 보기</Text>
+            <Ionicons name="chevron-forward" size={15} color={colors.textMuted} />
+          </TouchableOpacity>
         )}
       </ScrollView>
 
@@ -244,14 +353,48 @@ export default function HomeScreen() {
         </TouchableOpacity>
       )}
 
+      <EventDetailModal
+        visible={detailEvent !== null}
+        event={detailEvent}
+        linkLabel={linkLabel}
+        onOpenLink={openLink}
+        onClose={() => setDetailTarget(null)}
+        onEdit={() => {
+          if (!detailEvent) return;
+          const ev = detailEvent;
+          setDetailTarget(null);
+          setModal({ mode: 'edit', event: ev });
+        }}
+        onManageLinks={() => {
+          if (!detailEvent) return;
+          const ev = detailEvent;
+          setDetailTarget(null);
+          setLinkTarget(ev);
+        }}
+      />
+
       <EventEditModal
         visible={modal !== null}
         mode={modal?.mode ?? 'create'}
         initialTitle={modal?.mode === 'edit' ? modal.event.title : undefined}
         initialDate={modal?.mode === 'edit' ? modal.event.date : undefined}
+        initialPinned={modal?.mode === 'edit' ? modal.event.pinned : undefined}
+        initialTime={modal?.mode === 'edit' ? modal.event.time : undefined}
+        initialLocation={modal?.mode === 'edit' ? modal.event.location : undefined}
+        initialNote={modal?.mode === 'edit' ? modal.event.note : undefined}
         onClose={() => setModal(null)}
         onSubmit={handleSubmit}
         onDelete={modal?.mode === 'edit' ? handleDelete : undefined}
+      />
+
+      <PastEventsModal
+        visible={pastOpen}
+        events={past}
+        onClose={() => setPastOpen(false)}
+        onSelect={(e) => {
+          setPastOpen(false);
+          setDetailTarget(e);
+        }}
       />
 
       <EventLinkModal
@@ -263,7 +406,11 @@ export default function HomeScreen() {
         onSave={handleSaveLinks}
       />
 
-      <SettingsModal visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SettingsModal
+        visible={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onNotificationChange={() => setNotifRev((n) => n + 1)}
+      />
     </View>
   );
 }
@@ -290,9 +437,18 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     ...shadow.glow,
   },
-  heroLabel: { fontSize: 14, fontFamily: fonts.bold, color: colors.textSecondary, marginBottom: spacing.sm },
+  heroLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: spacing.sm },
+  heroLabel: { fontSize: 14, fontFamily: fonts.bold, color: colors.textSecondary },
   heroDday: { fontSize: 52, fontFamily: fonts.display, color: colors.primaryDark, letterSpacing: 1 },
   heroDate: { fontSize: 14, fontFamily: fonts.medium, color: colors.textSecondary, marginTop: spacing.sm },
+  heroMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 6,
+    maxWidth: '90%',
+  },
+  heroMetaText: { fontSize: 13, fontFamily: fonts.medium, color: colors.textSecondary, flexShrink: 1 },
   heroFootRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: spacing.md },
   heroFoot: { fontSize: 13, fontFamily: fonts.bold, color: colors.primaryDark },
   heroHint: { fontSize: 11, fontFamily: fonts.medium, color: colors.textMuted, marginTop: spacing.md },
@@ -342,10 +498,24 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     paddingHorizontal: spacing.sm,
   },
+  rowDdayWrapPinned: { backgroundColor: colors.primarySoft, borderWidth: 1, borderColor: colors.primarySoftBorder },
   rowDday: { fontSize: 13, fontFamily: fonts.extrabold, color: colors.primaryDark },
   rowTextWrap: { flex: 1 },
-  rowTitle: { ...type.headline, fontSize: 15 },
+  rowTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  rowTitle: { ...type.headline, fontSize: 15, flexShrink: 1 },
   rowDate: { ...type.caption, marginTop: 2 },
+  pastButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    marginTop: spacing.xl,
+    marginHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surfaceAlt,
+  },
+  pastButtonText: { fontSize: 13, fontFamily: fonts.bold, color: colors.textSecondary },
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, marginTop: spacing.sm },
   chipRowCenter: { justifyContent: 'center' },
   chip: {

@@ -412,25 +412,78 @@ app.post('/api/tabs/:tabId/history/:id/revert', (req, res) => {
 
 // ── 메인화면: 기념일 / D-day ──────────────────────────────
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+const LOCATION_MAX = 200;
+const NOTE_MAX = 2000;
+
+// body에 키가 있으면 정리한 문자열(빈 값은 '')을, 없으면 undefined(= 그대로 두기)를 돌려줍니다.
+function optionalText(body: Record<string, unknown>, key: string, max: number): string | undefined | null {
+  if (!Object.prototype.hasOwnProperty.call(body, key)) return undefined;
+  const v = body[key];
+  if (v === null || v === undefined || v === '') return '';
+  if (typeof v !== 'string') return null; // 잘못된 타입 신호
+  return v.trim().slice(0, max);
+}
 
 app.get('/api/events', (_req, res) => {
   res.json(store.listEvents());
 });
 
 app.post('/api/events', (req, res) => {
-  const { title, date } = req.body as { title?: string; date?: string };
+  const body = req.body as Record<string, unknown>;
+  const { title, date, pinned, time } = body as {
+    title?: string;
+    date?: string;
+    pinned?: unknown;
+    time?: unknown;
+  };
   if (!title || !title.trim()) return res.status(400).json({ error: 'title is required' });
   if (!date || !DATE_RE.test(date)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
-  res.status(201).json(store.createEvent(title.trim(), date));
+  if (pinned !== undefined && typeof pinned !== 'boolean') return res.status(400).json({ error: 'pinned must be a boolean' });
+  if (time !== undefined && time !== null && time !== '' && (typeof time !== 'string' || !TIME_RE.test(time))) {
+    return res.status(400).json({ error: 'time must be HH:MM (24h)' });
+  }
+  const location = optionalText(body, 'location', LOCATION_MAX);
+  const note = optionalText(body, 'note', NOTE_MAX);
+  if (location === null || note === null) return res.status(400).json({ error: 'location/note must be strings' });
+  res.status(201).json(
+    store.createEvent({
+      title: title.trim(),
+      date,
+      pinned: pinned === true,
+      time: typeof time === 'string' ? time : null,
+      location,
+      note,
+    })
+  );
 });
 
 app.put('/api/events/:id', (req, res) => {
-  const { title, date } = req.body as { title?: string; date?: string };
+  const body = req.body as Record<string, unknown>;
+  const { title, date, pinned, time } = body as {
+    title?: string;
+    date?: string;
+    pinned?: unknown;
+    time?: unknown;
+  };
   if (title !== undefined && !title.trim()) return res.status(400).json({ error: 'title cannot be empty' });
   if (date !== undefined && !DATE_RE.test(date)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  if (pinned !== undefined && typeof pinned !== 'boolean') return res.status(400).json({ error: 'pinned must be a boolean' });
+  const hasTime = Object.prototype.hasOwnProperty.call(body, 'time');
+  if (hasTime && time !== null && time !== '' && (typeof time !== 'string' || !TIME_RE.test(time))) {
+    return res.status(400).json({ error: 'time must be HH:MM (24h)' });
+  }
+  const location = optionalText(body, 'location', LOCATION_MAX);
+  const note = optionalText(body, 'note', NOTE_MAX);
+  if (location === null || note === null) return res.status(400).json({ error: 'location/note must be strings' });
+
   const updated = store.updateEvent(req.params.id, {
     title: title?.trim(),
     date,
+    pinned: pinned as boolean | undefined,
+    time: hasTime ? (typeof time === 'string' ? time : null) : undefined,
+    location,
+    note,
   });
   if (!updated) return res.status(404).json({ error: 'event not found' });
   res.json(updated);
@@ -471,6 +524,16 @@ app.post('/api/memos', (req, res) => {
   const { title } = req.body as { title?: string };
   if (!title || !title.trim()) return res.status(400).json({ error: 'title is required' });
   res.status(201).json(store.createMemo(title.trim()));
+});
+
+// :id 라우트보다 먼저 등록해야 "reorder"가 :id로 매칭되지 않습니다.
+app.put('/api/memos/reorder', (req, res) => {
+  const { orderedIds } = req.body as { orderedIds?: string[] };
+  if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
+    return res.status(400).json({ error: 'orderedIds is required' });
+  }
+  store.reorderMemos(orderedIds);
+  res.json(store.listMemos());
 });
 
 app.get('/api/memos/:id', (req, res) => {
@@ -520,6 +583,22 @@ app.put('/api/memos/:id', (req, res) => {
 app.delete('/api/memos/:id', (req, res) => {
   store.deleteMemo(req.params.id);
   res.status(204).end();
+});
+
+// 메모 본문 변경 이력 (되돌리기용)
+app.get('/api/memos/:id/history', (req, res) => {
+  if (!store.getMemo(req.params.id)) return res.status(404).json({ error: 'memo not found' });
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+  res.json(store.listMemoHistory(req.params.id, limit));
+});
+
+app.post('/api/memos/:id/history/:hid/revert', (req, res) => {
+  if (!store.getMemo(req.params.id)) return res.status(404).json({ error: 'memo not found' });
+  const hid = Number(req.params.hid);
+  if (!Number.isInteger(hid)) return res.status(400).json({ error: 'invalid history id' });
+  const result = store.revertMemo(req.params.id, hid, getEditor(req));
+  if (!result.ok) return res.status(404).json({ error: 'history entry not found' });
+  res.json(result.memo);
 });
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 4000;

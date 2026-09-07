@@ -43,6 +43,18 @@ export function formatKoreanDate(date: string): string {
   return `${p.y}년 ${p.m}월 ${p.d}일 (${wd})`;
 }
 
+// 'HH:MM'(24h) → '오후 2:30' 형태. 형식이 이상하면 원문 그대로.
+export function formatKoreanTime(time: string): string {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(time);
+  if (!m) return time;
+  const h = Number(m[1]);
+  const min = m[2];
+  if (h < 0 || h > 23) return time;
+  const ampm = h < 12 ? '오전' : '오후';
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${ampm} ${h12}:${min}`;
+}
+
 export function todayLabel(): string {
   const t = new Date();
   return `${t.getMonth() + 1}월 ${t.getDate()}일 ${WEEKDAYS[t.getDay()]}요일`;

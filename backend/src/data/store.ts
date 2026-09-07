@@ -2,7 +2,19 @@ import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import Database from 'better-sqlite3';
-import { Sheet, Tab, CellData, ColumnFormat, Merge, HistoryEntry, EventItem, EventLink, MemoSummary, Memo } from '../types';
+import {
+  Sheet,
+  Tab,
+  CellData,
+  ColumnFormat,
+  Merge,
+  HistoryEntry,
+  EventItem,
+  EventLink,
+  MemoSummary,
+  Memo,
+  MemoHistoryEntry,
+} from '../types';
 import { shiftFormulaRefs } from '../formula/shiftRefs';
 
 // 클라우드에 영구 디스크(volume)를 붙였다면 DB_PATH 환경변수로 그 경로를 가리키게 하세요.
@@ -139,7 +151,28 @@ db.exec(`
     PRIMARY KEY (event_id, kind, ref_id)
   );
   CREATE INDEX IF NOT EXISTS idx_event_links_event ON event_links (event_id);
+
+  CREATE TABLE IF NOT EXISTS memo_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    memo_id TEXT NOT NULL,
+    prev_content TEXT NOT NULL DEFAULT '',
+    next_content TEXT NOT NULL DEFAULT '',
+    editor TEXT,
+    kind TEXT NOT NULL DEFAULT 'edit',
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_memo_history_memo ON memo_history (memo_id, id DESC);
 `);
+
+// events에 pinned 컬럼을 나중에 추가했습니다. 고정(공지처럼 맨 위)된 일정을 표시합니다.
+if (!columnExists('events', 'pinned')) {
+  db.exec('ALTER TABLE events ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0');
+}
+
+// events에 시간·장소·메모를 나중에 추가했습니다. 모두 선택 입력이라 NULL 허용.
+if (!columnExists('events', 'time')) db.exec('ALTER TABLE events ADD COLUMN time TEXT');
+if (!columnExists('events', 'location')) db.exec('ALTER TABLE events ADD COLUMN location TEXT');
+if (!columnExists('events', 'note')) db.exec('ALTER TABLE events ADD COLUMN note TEXT');
 
 // tabs에 order_num 컬럼을 나중에 추가했습니다. 기존 탭들은 sheet별로 rowid(생성 순서) 기준으로 순번을 매겨줍니다.
 if (!columnExists('tabs', 'order_num')) {
@@ -209,6 +242,47 @@ const toHistory = (r: HistoryRow): HistoryEntry => ({
   prevFormula: r.prev_formula ?? undefined,
   nextValue: r.next_value,
   nextFormula: r.next_formula ?? undefined,
+  editor: r.editor ?? undefined,
+  kind: r.kind === 'revert' ? 'revert' : 'edit',
+  createdAt: r.created_at,
+});
+
+interface EventRow {
+  id: string;
+  title: string;
+  date: string;
+  order_num: number;
+  pinned: number;
+  time: string | null;
+  location: string | null;
+  note: string | null;
+}
+
+const toEvent = (r: EventRow, links: EventLink[]): EventItem => ({
+  id: r.id,
+  title: r.title,
+  date: r.date,
+  order: r.order_num,
+  pinned: !!r.pinned,
+  time: r.time ?? undefined,
+  location: r.location ?? undefined,
+  note: r.note ?? undefined,
+  links,
+});
+
+interface MemoHistoryRow {
+  id: number;
+  prev_content: string;
+  next_content: string;
+  editor: string | null;
+  kind: string;
+  created_at: number;
+}
+
+const toMemoHistory = (r: MemoHistoryRow): MemoHistoryEntry => ({
+  id: r.id,
+  content: r.next_content,
+  prevContent: r.prev_content,
   editor: r.editor ?? undefined,
   kind: r.kind === 'revert' ? 'revert' : 'edit',
   createdAt: r.created_at,
@@ -776,8 +850,11 @@ export const store = {
   // ── 메인화면: 기념일 / D-day ──────────────────────────────
   listEvents(): EventItem[] {
     const rows = db
-      .prepare('SELECT id, title, date, order_num FROM events ORDER BY date ASC, order_num ASC')
-      .all() as unknown as { id: string; title: string; date: string; order_num: number }[];
+      .prepare(
+        `SELECT id, title, date, order_num, pinned, time, location, note
+         FROM events ORDER BY pinned DESC, date ASC, time ASC, order_num ASC`
+      )
+      .all() as unknown as EventRow[];
     const linkRows = db
       .prepare('SELECT event_id, kind, ref_id FROM event_links')
       .all() as unknown as { event_id: string; kind: string; ref_id: string }[];
@@ -788,35 +865,65 @@ export const store = {
       list.push({ kind: r.kind, refId: r.ref_id });
       byEvent.set(r.event_id, list);
     });
-    return rows.map((r) => ({
-      id: r.id,
-      title: r.title,
-      date: r.date,
-      order: r.order_num,
-      links: byEvent.get(r.id) ?? [],
-    }));
+    return rows.map((r) => toEvent(r, byEvent.get(r.id) ?? []));
   },
 
   getEvent(id: string): EventItem | undefined {
     return store.listEvents().find((e) => e.id === id);
   },
 
-  createEvent(title: string, date: string): EventItem {
+  createEvent(input: {
+    title: string;
+    date: string;
+    pinned?: boolean;
+    time?: string | null;
+    location?: string | null;
+    note?: string | null;
+  }): EventItem {
     const { c } = db.prepare('SELECT COUNT(*) as c FROM events').get() as unknown as { c: number };
     const id = randomUUID();
-    db.prepare('INSERT INTO events (id, title, date, order_num) VALUES (?, ?, ?, ?)').run(id, title, date, c);
-    return { id, title, date, order: c, links: [] };
+    db.prepare(
+      `INSERT INTO events (id, title, date, order_num, pinned, time, location, note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      id,
+      input.title,
+      input.date,
+      c,
+      input.pinned ? 1 : 0,
+      input.time || null,
+      input.location || null,
+      input.note || null
+    );
+    return store.getEvent(id)!;
   },
 
-  updateEvent(id: string, patch: { title?: string; date?: string }): EventItem | undefined {
+  updateEvent(
+    id: string,
+    patch: {
+      title?: string;
+      date?: string;
+      pinned?: boolean;
+      // undefined = 그대로 두기, null 또는 '' = 지우기
+      time?: string | null;
+      location?: string | null;
+      note?: string | null;
+    }
+  ): EventItem | undefined {
     const existing = db
-      .prepare('SELECT id, title, date, order_num FROM events WHERE id = ?')
-      .get(id) as unknown as { id: string; title: string; date: string; order_num: number } | undefined;
+      .prepare('SELECT id, title, date, order_num, pinned, time, location, note FROM events WHERE id = ?')
+      .get(id) as unknown as EventRow | undefined;
     if (!existing) return undefined;
     const title = patch.title ?? existing.title;
     const date = patch.date ?? existing.date;
-    db.prepare('UPDATE events SET title = ?, date = ? WHERE id = ?').run(title, date, id);
-    return { id, title, date, order: existing.order_num, links: store.getEventLinks(id) };
+    const pinned = patch.pinned ?? !!existing.pinned;
+    const time = patch.time !== undefined ? patch.time || null : existing.time;
+    const location = patch.location !== undefined ? patch.location || null : existing.location;
+    const note = patch.note !== undefined ? patch.note || null : existing.note;
+    db.prepare(
+      'UPDATE events SET title = ?, date = ?, pinned = ?, time = ?, location = ?, note = ? WHERE id = ?'
+    ).run(title, date, pinned ? 1 : 0, time, location, note, id);
+    return store.getEvent(id)!;
   },
 
   deleteEvent(id: string) {
@@ -893,6 +1000,18 @@ export const store = {
     };
   },
 
+  reorderMemos(orderedIds: string[]) {
+    const update = db.prepare('UPDATE memos SET order_num = ? WHERE id = ?');
+    db.exec('BEGIN');
+    try {
+      orderedIds.forEach((id, i) => update.run(i, id));
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+  },
+
   createMemo(title: string): Memo {
     const { c } = db.prepare('SELECT COUNT(*) as c FROM memos').get() as unknown as { c: number };
     const id = randomUUID();
@@ -904,10 +1023,12 @@ export const store = {
   },
 
   // 반환값의 updatedAt은 새 수정 시각. 클라이언트가 다음 저장 때 충돌 감지 기준으로 다시 보냅니다.
+  // 본문이 바뀌면 memo_history에 스냅샷 1건을 같이 남깁니다(되돌리기용).
   updateMemo(
     id: string,
     patch: { title?: string; content?: string },
-    editor: string | undefined
+    editor: string | undefined,
+    kind: 'edit' | 'revert' = 'edit'
   ): Memo | undefined {
     const existing = store.getMemo(id);
     if (!existing) return undefined;
@@ -915,14 +1036,52 @@ export const store = {
     const content = patch.content ?? existing.content;
     if (title === existing.title && content === existing.content) return existing;
     const now = Date.now();
-    db.prepare('UPDATE memos SET title = ?, content = ?, updated_at = ?, updated_by = ? WHERE id = ?').run(
-      title,
-      content,
-      now,
-      editor ?? null,
-      id
-    );
+    db.exec('BEGIN');
+    try {
+      db.prepare('UPDATE memos SET title = ?, content = ?, updated_at = ?, updated_by = ? WHERE id = ?').run(
+        title,
+        content,
+        now,
+        editor ?? null,
+        id
+      );
+      if (content !== existing.content) {
+        db.prepare(
+          `INSERT INTO memo_history (memo_id, prev_content, next_content, editor, kind, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        ).run(id, existing.content, content, editor ?? null, kind, now);
+      }
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
     return { ...existing, title, content, updatedAt: now, updatedBy: editor };
+  },
+
+  listMemoHistory(memoId: string, limit = 50): MemoHistoryEntry[] {
+    const rows = db
+      .prepare(
+        `SELECT id, prev_content, next_content, editor, kind, created_at
+         FROM memo_history WHERE memo_id = ? ORDER BY id DESC LIMIT ?`
+      )
+      .all(memoId, limit) as unknown as MemoHistoryRow[];
+    return rows.map(toMemoHistory);
+  },
+
+  // 이력 한 건의 스냅샷(next_content)으로 본문을 되돌립니다. 되돌리기 자체도 새 이력으로 남습니다.
+  revertMemo(
+    memoId: string,
+    historyId: number,
+    editor: string | undefined
+  ): { ok: true; memo: Memo } | { ok: false; reason: 'not_found' } {
+    const entry = db
+      .prepare('SELECT next_content FROM memo_history WHERE id = ? AND memo_id = ?')
+      .get(historyId, memoId) as unknown as { next_content: string } | undefined;
+    if (!entry) return { ok: false, reason: 'not_found' };
+    const memo = store.updateMemo(memoId, { content: entry.next_content }, editor, 'revert');
+    if (!memo) return { ok: false, reason: 'not_found' };
+    return { ok: true, memo };
   },
 
   getMemoMeta(id: string): number | null {
@@ -934,6 +1093,7 @@ export const store = {
 
   deleteMemo(id: string) {
     db.prepare('DELETE FROM memos WHERE id = ?').run(id);
+    db.prepare('DELETE FROM memo_history WHERE memo_id = ?').run(id);
     db.prepare("DELETE FROM event_links WHERE kind = 'memo' AND ref_id = ?").run(id);
   },
 };

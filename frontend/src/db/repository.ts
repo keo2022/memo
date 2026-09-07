@@ -10,6 +10,7 @@ import {
   EventLink,
   MemoSummary,
   Memo,
+  MemoHistoryEntry,
 } from '../types';
 import { getCachedEditorName } from '../lib/identity';
 
@@ -195,14 +196,32 @@ export const api = {
   async getEvents(): Promise<EventItem[]> {
     // 서버 버전이 낮아 links가 없을 수도 있어 항상 배열로 맞춰줍니다.
     const list = await request<EventItem[]>('/api/events');
-    return list.map((e) => ({ ...e, links: e.links ?? [] }));
+    return list.map((e) => ({ ...e, pinned: e.pinned ?? false, links: e.links ?? [] }));
   },
 
-  createEvent(title: string, date: string): Promise<EventItem> {
-    return request('/api/events', { method: 'POST', body: JSON.stringify({ title, date }) });
+  createEvent(input: {
+    title: string;
+    date: string;
+    pinned?: boolean;
+    time?: string | null;
+    location?: string | null;
+    note?: string | null;
+  }): Promise<EventItem> {
+    return request('/api/events', { method: 'POST', body: JSON.stringify(input) });
   },
 
-  updateEvent(id: string, patch: { title?: string; date?: string }): Promise<EventItem> {
+  updateEvent(
+    id: string,
+    // time/location/note: 키를 넣지 않으면 그대로, '' 또는 null이면 지웁니다.
+    patch: {
+      title?: string;
+      date?: string;
+      pinned?: boolean;
+      time?: string | null;
+      location?: string | null;
+      note?: string | null;
+    }
+  ): Promise<EventItem> {
     return request(`/api/events/${id}`, { method: 'PUT', body: JSON.stringify(patch) });
   },
 
@@ -227,6 +246,10 @@ export const api = {
     return request('/api/memos', { method: 'POST', body: JSON.stringify({ title }) });
   },
 
+  reorderMemos(orderedIds: string[]): Promise<MemoSummary[]> {
+    return request('/api/memos/reorder', { method: 'PUT', body: JSON.stringify({ orderedIds }) });
+  },
+
   updateMemo(
     id: string,
     patch: { title?: string; content?: string },
@@ -239,5 +262,13 @@ export const api = {
 
   deleteMemo(id: string): Promise<void> {
     return request(`/api/memos/${id}`, { method: 'DELETE' });
+  },
+
+  getMemoHistory(id: string, limit = 50): Promise<MemoHistoryEntry[]> {
+    return request(`/api/memos/${id}/history?limit=${limit}`);
+  },
+
+  revertMemoHistory(id: string, historyId: number): Promise<Memo> {
+    return request(`/api/memos/${id}/history/${historyId}/revert`, { method: 'POST' });
   },
 };

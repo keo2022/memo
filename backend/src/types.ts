@@ -41,6 +41,10 @@ export interface EventItem {
   title: string;
   date: string; // 'YYYY-MM-DD'
   order: number;
+  pinned: boolean; // 공지처럼 맨 위에 고정
+  time?: string; // 'HH:MM' (24시간). 없으면 하루 종일.
+  location?: string;
+  note?: string;
   links: EventLink[];
 }
 
@@ -54,6 +58,16 @@ export interface MemoSummary {
 
 export interface Memo extends MemoSummary {
   content: string;
+  createdAt: number;
+}
+
+// 메모 본문이 바뀔 때마다 남기는 스냅샷 1건. next_content = 그 저장 직후의 전체 본문.
+export interface MemoHistoryEntry {
+  id: number;
+  content: string; // 이 시점의 본문 스냅샷 (되돌리면 이 내용으로 복원)
+  prevContent: string;
+  editor?: string;
+  kind: 'edit' | 'revert';
   createdAt: number;
 }
 

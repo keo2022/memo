@@ -11,6 +11,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { colors, radius, spacing, shadow, fonts, type } from '../theme';
 import type { EventItem, EventLink, MemoSummary, Sheet } from '../types';
+import { friendlyMessage } from '../lib/errors';
 
 interface Props {
   visible: boolean;
@@ -49,7 +50,7 @@ export default function EventLinkModal({ visible, event, memos, sheets, onClose,
       await onSave(links);
       onClose();
     } catch (e) {
-      Alert.alert('저장 실패', String(e));
+      Alert.alert('저장 실패', friendlyMessage(e));
     } finally {
       setBusy(false);
     }

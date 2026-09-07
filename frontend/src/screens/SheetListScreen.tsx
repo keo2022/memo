@@ -1,10 +1,9 @@
 import React, { useCallback, useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Alert } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert } from 'react-native';
 import DraggableFlatList, { RenderItemParams, ScaleDecorator } from 'react-native-draggable-flatlist';
 import { Ionicons } from '@expo/vector-icons';
 import Animated, { BounceIn } from 'react-native-reanimated';
 import { useFocusEffect } from '@react-navigation/native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/RootNavigator';
 import { api } from '../db/repository';
@@ -17,11 +16,11 @@ import Squishy from '../components/Squishy';
 import HeartBurst from '../components/HeartBurst';
 import EmptyIllustration from '../components/illustrations/EmptyIllustration';
 import { useReduceMotion } from '../hooks/useReduceMotion';
+import { friendlyMessage } from '../lib/errors';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'SheetList'>;
 
 export default function SheetListScreen({ navigation }: Props) {
-  const insets = useSafeAreaInsets();
   const reduceMotion = useReduceMotion();
   const [sheets, setSheets] = useState<Sheet[]>([]);
   const [loading, setLoading] = useState(false);
@@ -30,13 +29,16 @@ export default function SheetListScreen({ navigation }: Props) {
   const [addModalVisible, setAddModalVisible] = useState(false);
   const [listKey, setListKey] = useState(0);
   const [burst, setBurst] = useState(0);
+  const [loadError, setLoadError] = useState(false);
 
   const loadSheets = useCallback(async () => {
     try {
       setLoading(true);
       setSheets(await api.getSheets());
+      setLoadError(false);
     } catch (e) {
-      Alert.alert('시트를 불러오지 못했습니다', String(e));
+      setLoadError(true);
+      Alert.alert('시트를 불러오지 못했어요', friendlyMessage(e));
     } finally {
       setLoading(false);
       setFirstLoad(false);
@@ -55,7 +57,7 @@ export default function SheetListScreen({ navigation }: Props) {
       setBurst((b) => b + 1);
       loadSheets();
     } catch (e) {
-      Alert.alert('시트 생성 실패', String(e));
+      Alert.alert('시트 생성 실패', friendlyMessage(e));
     }
   };
 
@@ -66,7 +68,7 @@ export default function SheetListScreen({ navigation }: Props) {
     try {
       await api.reorderSheets(reordered.map((s) => s.id));
     } catch (e) {
-      Alert.alert('순서 변경 실패', String(e));
+      Alert.alert('순서 변경 실패', friendlyMessage(e));
       loadSheets();
     }
   };
@@ -114,7 +116,18 @@ export default function SheetListScreen({ navigation }: Props) {
         onDragEnd={({ data }) => handleReorder(data)}
         removeClippedSubviews={false}
         ListEmptyComponent={
-          firstLoad ? null : (
+          firstLoad ? (
+            <ActivityIndicator color={colors.primary} style={{ marginTop: spacing.xxl }} />
+          ) : loadError ? (
+            <View style={styles.empty}>
+              <Text style={styles.emptyTitle}>불러오지 못했어요</Text>
+              <Text style={styles.emptyText}>{'인터넷 연결을 확인하고\n다시 시도해주세요'}</Text>
+              <Squishy style={styles.emptyCta} onPress={loadSheets}>
+                <Ionicons name="refresh" size={20} color={colors.white} />
+                <Text style={styles.emptyCtaText}>다시 시도</Text>
+              </Squishy>
+            </View>
+          ) : (
             <View style={styles.empty}>
               <EmptyIllustration variant="sheets" />
               <Text style={styles.emptyTitle}>여기 아직 비어있어요</Text>
@@ -131,7 +144,7 @@ export default function SheetListScreen({ navigation }: Props) {
 
       <Animated.View
         entering={reduceMotion ? undefined : BounceIn.delay(150)}
-        style={[styles.fabWrap, { bottom: insets.bottom + spacing.lg }]}
+        style={[styles.fabWrap, { bottom: spacing.lg }]}
       >
         <Squishy style={styles.fab} onPress={() => setAddModalVisible(true)}>
           <Ionicons name="add" size={22} color={colors.white} />
@@ -153,7 +166,7 @@ export default function SheetListScreen({ navigation }: Props) {
         visible={!!actionTarget}
         itemName={actionTarget?.name ?? ''}
         itemTypeLabel="시트"
-        deleteWarning={`"${actionTarget?.name ?? ''}"`}
+        deleteWarning={`"${actionTarget?.name ?? ''}" 시트 안의 탭과 표 내용이 모두 사라져요. 되돌릴 수 없어요.`}
         onClose={() => setActionTarget(null)}
         onRename={async (name) => {
           if (!actionTarget) return;
@@ -161,7 +174,7 @@ export default function SheetListScreen({ navigation }: Props) {
             await api.renameSheet(actionTarget.id, name);
             loadSheets();
           } catch (e) {
-            Alert.alert('이름 변경 실패', String(e));
+            Alert.alert('이름 변경 실패', friendlyMessage(e));
           }
         }}
         onDelete={async () => {
@@ -170,7 +183,7 @@ export default function SheetListScreen({ navigation }: Props) {
             await api.deleteSheet(actionTarget.id);
             loadSheets();
           } catch (e) {
-            Alert.alert('삭제 실패', String(e));
+            Alert.alert('삭제 실패', friendlyMessage(e));
           }
         }}
       />

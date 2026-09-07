@@ -3,6 +3,7 @@ import { Platform } from 'react-native';
 import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import SheetListScreen from '../screens/SheetListScreen';
 import TabListScreen from '../screens/TabListScreen';
@@ -99,6 +100,11 @@ const TAB_LABELS: Record<keyof RootTabParamList, string> = {
 };
 
 export default function RootNavigator() {
+  const insets = useSafeAreaInsets();
+  // 홈 인디케이터나 3버튼 내비게이션 바(뒤로가기·홈 등)가 있는 기기에서는
+  // 그 높이만큼 탭 바를 띄워, 메뉴가 시스템 버튼에 가리지 않게 합니다.
+  const tabContentHeight = Platform.OS === 'ios' ? 50 : 62;
+
   return (
     <NavigationContainer theme={navigationTheme}>
       <Tab.Navigator
@@ -111,8 +117,9 @@ export default function RootNavigator() {
           tabBarStyle: {
             backgroundColor: colors.surface,
             borderTopColor: colors.border,
-            height: Platform.OS === 'ios' ? 84 : 62,
+            height: tabContentHeight + insets.bottom,
             paddingTop: 6,
+            paddingBottom: insets.bottom,
           },
           tabBarLabel: TAB_LABELS[route.name],
           tabBarIcon: ({ focused, color, size }) => (

@@ -27,6 +27,7 @@ import Snackbar from '../components/Snackbar';
 import HeartBurst from '../components/HeartBurst';
 import EmptyIllustration from '../components/illustrations/EmptyIllustration';
 import { useReduceMotion } from '../hooks/useReduceMotion';
+import { friendlyMessage } from '../lib/errors';
 
 const POLL_INTERVAL_MS = 15000;
 
@@ -174,7 +175,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
         navigation.setParams({ tabId: detail.id, tabName: detail.name });
       }
     } catch (e) {
-      Alert.alert('탭을 불러오지 못했습니다', String(e));
+      Alert.alert('탭을 불러오지 못했습니다', friendlyMessage(e));
     } finally {
       setLoading(false);
     }
@@ -193,7 +194,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
       setSiblings(await api.getTabs(sheetId));
       setTab(await api.getTab(newTab.id));
     } catch (e) {
-      Alert.alert('탭 생성 실패', String(e));
+      Alert.alert('탭 생성 실패', friendlyMessage(e));
     }
   };
 
@@ -281,9 +282,12 @@ export default function TabDetailScreen({ route, navigation }: Props) {
     return offsets;
   }, [colWidths]);
 
-  // 로컬 DB라 로딩이 순식간이라, 첫 로드 전에는 별도 로딩 화면 없이 배경만 보여줍니다.
   if (loading && !tab) {
-    return <View style={styles.container} />;
+    return (
+      <View style={[styles.container, styles.center]}>
+        <ActivityIndicator color={colors.primary} />
+      </View>
+    );
   }
 
   if (!tab) {
@@ -354,7 +358,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
       setSelected(null);
       await loadTab();
     } catch (e) {
-      Alert.alert('저장 실패', String(e));
+      Alert.alert('저장 실패', friendlyMessage(e));
     } finally {
       setSavingCell(false);
     }
@@ -367,7 +371,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
       await api.setColumnFormat(tab.id, formatPickerCol, format);
       loadTab();
     } catch (e) {
-      Alert.alert('열 포맷 변경 실패', String(e));
+      Alert.alert('열 포맷 변경 실패', friendlyMessage(e));
     }
   };
 
@@ -379,7 +383,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
       await api.setColumnWidth(tab.id, formatPickerCol, next);
       loadTab();
     } catch (e) {
-      Alert.alert('열 너비 변경 실패', String(e));
+      Alert.alert('열 너비 변경 실패', friendlyMessage(e));
     }
   };
 
@@ -389,7 +393,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
       await api.setColumnWidth(tab.id, formatPickerCol, null);
       loadTab();
     } catch (e) {
-      Alert.alert('열 너비 초기화 실패', String(e));
+      Alert.alert('열 너비 초기화 실패', friendlyMessage(e));
     }
   };
 
@@ -399,7 +403,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
       await api.setColumnWidth(tab.id, formatPickerCol, DEFAULT_COL_WIDTH);
       loadTab();
     } catch (e) {
-      Alert.alert('열 너비 초기화 실패', String(e));
+      Alert.alert('열 너비 초기화 실패', friendlyMessage(e));
     }
   };
 
@@ -422,7 +426,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
       setMergeTarget(null);
       loadTab();
     } catch (e) {
-      Alert.alert('병합 실패', String(e));
+      Alert.alert('병합 실패', friendlyMessage(e));
     }
   };
 
@@ -433,7 +437,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
       setMergeTarget(null);
       loadTab();
     } catch (e) {
-      Alert.alert('병합 해제 실패', String(e));
+      Alert.alert('병합 해제 실패', friendlyMessage(e));
     }
   };
 
@@ -444,7 +448,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
       await api.insertRow(tab.id, index);
       await loadTab();
     } catch (e) {
-      Alert.alert('행 추가 실패', String(e));
+      Alert.alert('행 추가 실패', friendlyMessage(e));
     } finally {
       setResizing(false);
     }
@@ -457,7 +461,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
       await api.insertColumn(tab.id, index);
       await loadTab();
     } catch (e) {
-      Alert.alert('열 추가 실패', String(e));
+      Alert.alert('열 추가 실패', friendlyMessage(e));
     } finally {
       setResizing(false);
     }
@@ -471,7 +475,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
       await loadTab();
       setSnackbar({ message: '행이 삭제되었습니다' });
     } catch (e) {
-      Alert.alert('행 삭제 실패', String(e));
+      Alert.alert('행 삭제 실패', friendlyMessage(e));
     } finally {
       setResizing(false);
     }
@@ -485,7 +489,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
       await loadTab();
       setSnackbar({ message: '열이 삭제되었습니다' });
     } catch (e) {
-      Alert.alert('열 삭제 실패', String(e));
+      Alert.alert('열 삭제 실패', friendlyMessage(e));
     } finally {
       setResizing(false);
     }
@@ -497,7 +501,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
       await api.undoLastDelete(tab.id);
       await loadTab();
     } catch (e) {
-      Alert.alert('실행취소 실패', String(e));
+      Alert.alert('실행취소 실패', friendlyMessage(e));
     }
   };
 
@@ -545,7 +549,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
       setSelected(null);
       await loadTab();
     } catch (e) {
-      Alert.alert('저장 실패', String(e));
+      Alert.alert('저장 실패', friendlyMessage(e));
     } finally {
       setSavingCell(false);
     }
@@ -559,7 +563,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
       setSelected(null);
       await loadTab();
     } catch (e) {
-      Alert.alert('지우기 실패', String(e));
+      Alert.alert('지우기 실패', friendlyMessage(e));
     } finally {
       setSavingCell(false);
     }
@@ -588,7 +592,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
         await loadTab();
       }
     } catch (e) {
-      Alert.alert('저장 실패', String(e));
+      Alert.alert('저장 실패', friendlyMessage(e));
     }
   };
 

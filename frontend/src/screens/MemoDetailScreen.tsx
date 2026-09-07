@@ -12,6 +12,7 @@ import {
   Modal,
   KeyboardAvoidingView,
   Platform,
+  AppState,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
@@ -21,6 +22,8 @@ import { api, ConflictError, type MemoConflictCurrent } from '../db/repository';
 import type { Memo } from '../types';
 import { colors, radius, spacing, shadow, fonts } from '../theme';
 import { relativeTime } from '../lib/date';
+import { friendlyMessage } from '../lib/errors';
+import MemoHistoryModal from '../components/MemoHistoryModal';
 
 type Props = NativeStackScreenProps<MemoStackParamList, 'MemoDetail'>;
 
@@ -36,6 +39,7 @@ export default function MemoDetailScreen({ route, navigation }: Props) {
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [conflict, setConflict] = useState<MemoConflictCurrent | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   const dirty = content !== savedContent;
   const dirtyRef = useRef(false);
@@ -54,7 +58,7 @@ export default function MemoDetailScreen({ route, navigation }: Props) {
         const m = await api.getMemo(memoId);
         applyMemo(m, keepDraft);
       } catch (e) {
-        Alert.alert('메모를 불러오지 못했습니다', String(e));
+        Alert.alert('메모를 불러오지 못했습니다', friendlyMessage(e));
       }
     },
     [memoId, applyMemo]
@@ -92,7 +96,7 @@ export default function MemoDetailScreen({ route, navigation }: Props) {
       if (e instanceof ConflictError) {
         setConflict(e.current as MemoConflictCurrent);
       } else {
-        Alert.alert('저장 실패', String(e));
+        Alert.alert('저장 실패', friendlyMessage(e));
       }
     } finally {
       setSaving(false);
@@ -108,6 +112,21 @@ export default function MemoDetailScreen({ route, navigation }: Props) {
     return () => clearTimeout(t);
   }, [content, dirty, saving, conflict]);
 
+  // 앱을 백그라운드로 보내거나 전화가 오면(= active가 아니게 되면) 자동저장을 기다리지 않고 바로 저장합니다.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') saveRef.current();
+    });
+    return () => sub.remove();
+  }, []);
+
+  const applyReverted = useCallback((m: Memo) => {
+    setMemo(m);
+    setContent(m.content);
+    setSavedContent(m.content);
+    setBaseUpdatedAt(m.updatedAt ?? null);
+  }, []);
+
   const overwriteWithMine = async () => {
     const c = conflict;
     setConflict(null);
@@ -121,7 +140,7 @@ export default function MemoDetailScreen({ route, navigation }: Props) {
       setBaseUpdatedAt(updated.updatedAt ?? null);
     } catch (e) {
       if (e instanceof ConflictError) setConflict(e.current as MemoConflictCurrent);
-      else Alert.alert('저장 실패', String(e));
+      else Alert.alert('저장 실패', friendlyMessage(e));
     } finally {
       setSaving(false);
     }
@@ -148,19 +167,25 @@ export default function MemoDetailScreen({ route, navigation }: Props) {
 
   useLayoutEffect(() => {
     navigation.setOptions({
-      headerRight: () =>
-        saving ? (
-          <ActivityIndicator size="small" color={colors.primary} />
-        ) : dirty ? (
-          <TouchableOpacity onPress={save} hitSlop={8}>
-            <Text style={styles.saveButton}>저장</Text>
+      headerRight: () => (
+        <View style={styles.headerRight}>
+          <TouchableOpacity onPress={() => setHistoryOpen(true)} hitSlop={8}>
+            <Ionicons name="time-outline" size={22} color={colors.primary} />
           </TouchableOpacity>
-        ) : (
-          <View style={styles.savedWrap}>
-            <Ionicons name="checkmark-circle" size={16} color={colors.mint} />
-            <Text style={styles.savedText}>저장됨</Text>
-          </View>
-        ),
+          {saving ? (
+            <ActivityIndicator size="small" color={colors.primary} />
+          ) : dirty ? (
+            <TouchableOpacity onPress={save} hitSlop={8}>
+              <Text style={styles.saveButton}>저장</Text>
+            </TouchableOpacity>
+          ) : (
+            <View style={styles.savedWrap}>
+              <Ionicons name="checkmark-circle" size={16} color={colors.mint} />
+              <Text style={styles.savedText}>저장됨</Text>
+            </View>
+          )}
+        </View>
+      ),
     });
   }, [navigation, saving, dirty, save]);
 
@@ -188,7 +213,6 @@ export default function MemoDetailScreen({ route, navigation }: Props) {
           onChangeText={setContent}
           multiline
           textAlignVertical="top"
-          scrollEnabled={false}
         />
       </ScrollView>
 
@@ -200,6 +224,16 @@ export default function MemoDetailScreen({ route, navigation }: Props) {
               {conflict?.updatedBy ? `${conflict.updatedBy}님이` : '상대방이'} 먼저 이 메모를 저장했어요.
               {'\n'}어떻게 할까요?
             </Text>
+
+            <View style={styles.conflictPreviewWrap}>
+              <Text style={styles.conflictPreviewLabel}>상대가 저장한 내용</Text>
+              <ScrollView style={styles.conflictPreview} nestedScrollEnabled>
+                <Text style={styles.conflictPreviewText}>
+                  {conflict?.content?.trim() ? conflict.content : '(빈 내용)'}
+                </Text>
+              </ScrollView>
+            </View>
+
             <TouchableOpacity style={[styles.modalButton, styles.modalPrimary]} onPress={overwriteWithMine}>
               <Text style={styles.modalPrimaryText}>내 내용으로 덮어쓰기</Text>
             </TouchableOpacity>
@@ -212,6 +246,13 @@ export default function MemoDetailScreen({ route, navigation }: Props) {
           </View>
         </View>
       </Modal>
+
+      <MemoHistoryModal
+        visible={historyOpen}
+        memoId={memoId}
+        onClose={() => setHistoryOpen(false)}
+        onReverted={applyReverted}
+      />
     </KeyboardAvoidingView>
   );
 }
@@ -231,19 +272,30 @@ const styles = StyleSheet.create({
   meta: { ...{ fontSize: 12, fontFamily: fonts.medium }, color: colors.textMuted, marginBottom: spacing.md },
   input: {
     flex: 1,
-    minHeight: 320,
     fontSize: 16,
     lineHeight: 24,
     color: colors.textPrimary,
     fontFamily: fonts.regular,
   },
+  headerRight: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
   saveButton: { color: colors.primaryDark, fontFamily: fonts.bold, fontSize: 15 },
   savedWrap: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   savedText: { color: colors.textMuted, fontFamily: fonts.semibold, fontSize: 12 },
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(58,46,48,0.4)', alignItems: 'center', justifyContent: 'center' },
   modalCard: { width: '86%', backgroundColor: colors.surface, borderRadius: radius.xl, padding: spacing.lg, ...shadow.floating },
   modalTitle: { fontSize: 17, fontFamily: fonts.bold, color: colors.textPrimary, marginBottom: spacing.sm },
-  modalLead: { fontSize: 14, fontFamily: fonts.medium, color: colors.textSecondary, lineHeight: 20, marginBottom: spacing.lg },
+  modalLead: { fontSize: 14, fontFamily: fonts.medium, color: colors.textSecondary, lineHeight: 20, marginBottom: spacing.md },
+  conflictPreviewWrap: { marginBottom: spacing.lg },
+  conflictPreviewLabel: { fontSize: 11, fontFamily: fonts.bold, color: colors.textMuted, marginBottom: 4 },
+  conflictPreview: {
+    maxHeight: 120,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    backgroundColor: colors.background,
+    padding: spacing.sm,
+  },
+  conflictPreviewText: { fontSize: 13, fontFamily: fonts.regular, color: colors.textPrimary, lineHeight: 19 },
   modalButton: { borderRadius: radius.pill, paddingVertical: 12, alignItems: 'center', marginBottom: spacing.sm },
   modalPrimary: { backgroundColor: colors.primary },
   modalPrimaryText: { color: colors.white, fontFamily: fonts.bold, fontSize: 14 },
