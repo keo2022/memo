@@ -45,6 +45,14 @@ function cellValueLabel(value: string, formula?: string): string {
   return value === '' ? '(빈칸)' : value;
 }
 
+// 엑셀/메모장에서 여러 줄(또는 탭으로 구분된 여러 칸)을 복사해 붙여넣었을 때 셀 하나하나에 나눠 담기 위해 파싱합니다.
+// 줄바꿈 = 다음 행, 탭 = 다음 열. 복사할 때 흔히 따라오는 맨 끝 빈 줄은 버립니다.
+function parsePasteGrid(text: string): string[][] {
+  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+  return lines.map((line) => line.split('\t'));
+}
+
 type Props = NativeStackScreenProps<RootStackParamList, 'TabDetail'>;
 
 const CELL_WIDTH = 96;
@@ -555,6 +563,68 @@ export default function TabDetailScreen({ route, navigation }: Props) {
     }
   };
 
+  // 붙여넣은 여러 줄/탭 구분 텍스트를 선택한 셀부터 오른쪽·아래로 채웁니다. 상대 편집과 충돌 여부는 따로 확인하지 않고 덮어씁니다
+  // (칸마다 변경 이력은 남아서 잘못 붙였으면 각 셀 이력에서 되돌릴 수 있어요).
+  const applyPasteGrid = async (grid: string[][], startRow: number, startCol: number) => {
+    if (!tab) return;
+    setSavingCell(true);
+    try {
+      for (let r = 0; r < grid.length; r++) {
+        const row = startRow + r;
+        if (row >= tab.rows) break;
+        for (let c = 0; c < grid[r].length; c++) {
+          const col = startCol + c;
+          if (col >= tab.cols) continue;
+          const raw = grid[r][c];
+          const trimmed = raw.trim();
+          const isFormula = trimmed.startsWith('=');
+          await writeCell(
+            row,
+            col,
+            isFormula ? '' : raw,
+            isFormula ? trimmed : undefined,
+            undefined,
+            cellValueLabel(raw, isFormula ? trimmed : undefined)
+          );
+        }
+      }
+      setBurst((b) => b + 1);
+      setSelected(null);
+      await loadTab();
+    } catch (e) {
+      Alert.alert('붙여넣기 실패', friendlyMessage(e));
+    } finally {
+      setSavingCell(false);
+    }
+  };
+
+  // 일반 타이핑(엔터 한 번에 줄바꿈 하나)과 여러 줄/탭이 한꺼번에 들어온 붙여넣기를 구분합니다.
+  // 모바일 키보드로는 탭 문자를 직접 칠 수 없으니 탭이 하나라도 있으면 붙여넣기로 봅니다.
+  const handleDraftChange = (next: string) => {
+    if (!selected) {
+      setDraft(next);
+      return;
+    }
+    const prevLines = draft.split('\n').length;
+    const nextLines = next.split('\n').length;
+    const pasted = next.includes('\t') || nextLines - prevLines > 1;
+    if (!pasted) {
+      setDraft(next);
+      return;
+    }
+    const grid = parsePasteGrid(next);
+    const cellCount = grid.reduce((sum, r) => sum + r.length, 0);
+    if (cellCount <= 1) {
+      setDraft(next);
+      return;
+    }
+    const { row, col } = selected;
+    Alert.alert('여러 셀에 붙여넣기', `${cellCount}개 셀에 나눠서 채울까요?`, [
+      { text: '취소', style: 'cancel' },
+      { text: '채우기', onPress: () => applyPasteGrid(grid, row, col) },
+    ]);
+  };
+
   const clearCell = async () => {
     if (!selected || savingCell) return;
     setSavingCell(true);
@@ -639,8 +709,13 @@ export default function TabDetailScreen({ route, navigation }: Props) {
       );
     }
 
+    const isError = isFormula && !!cell?.error;
     let display: string;
-    if (isFormula) {
+    if (isError) {
+      // 수식 문법 오류나 0으로 나누기처럼 숫자로 나타낼 수 없는 결과. 값은 서버에 0으로 저장돼 있지만 그대로 보여주면
+      // 정상 계산된 0과 구분이 안 되므로 #ERROR!로 표시합니다. 셀을 열어서 수식을 고치면 사라집니다.
+      display = '#ERROR!';
+    } else if (isFormula) {
       display = format === 'number' ? formatNumberDisplay(String(cell?.computed)) : String(cell?.computed);
     } else {
       display = format === 'number' ? formatNumberDisplay(rawValue) : rawValue;
@@ -649,12 +724,15 @@ export default function TabDetailScreen({ route, navigation }: Props) {
     return (
       <TouchableOpacity
         key={`${row}_${col}`}
-        style={[styles.cell, isFormula && styles.cellFormula, positionStyle]}
+        style={[styles.cell, isFormula && styles.cellFormula, isError && styles.cellError, positionStyle]}
         activeOpacity={0.6}
         onPress={() => openCell(row, col)}
         onLongPress={() => openMergeModal(row, col)}
       >
-        <Text numberOfLines={1} style={[styles.cellText, isFormula && styles.cellTextFormula]}>
+        <Text
+          numberOfLines={1}
+          style={[styles.cellText, isFormula && styles.cellTextFormula, isError && styles.cellTextError]}
+        >
           {display}
         </Text>
       </TouchableOpacity>
@@ -760,7 +838,7 @@ export default function TabDetailScreen({ route, navigation }: Props) {
                   <TextInput
                     style={styles.modalInput}
                     value={draft}
-                    onChangeText={setDraft}
+                    onChangeText={handleDraftChange}
                     autoFocus
                     multiline
                     textAlignVertical="top"
@@ -1183,12 +1261,14 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
   },
   cellFormula: { backgroundColor: colors.accentSoft },
+  cellError: { backgroundColor: colors.dangerSoft },
   headerCell: { backgroundColor: colors.surfaceAlt, borderColor: colors.borderStrong },
   rowHeaderCell: { width: ROW_HEADER_WIDTH },
   headerText: { fontFamily: fonts.bold, color: colors.textSecondary, fontSize: 13 },
   headerFormatIcon: { marginTop: 2 },
   cellText: { fontSize: 14, color: colors.textPrimary, fontFamily: fonts.regular },
   cellTextFormula: { color: colors.accentDark, fontFamily: fonts.bold },
+  cellTextError: { color: colors.danger },
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(58,46,48,0.4)', alignItems: 'center', justifyContent: 'center' },
   modalCard: {
     width: '85%',

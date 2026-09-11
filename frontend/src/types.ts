@@ -19,6 +19,8 @@ export interface CellInfo {
   value: string;
   formula?: string;
   computed: number;
+  // 수식이 잘못됐거나(문법 오류) 0으로 나누기처럼 숫자로 나타낼 수 없는 결과가 나왔을 때만 true.
+  error?: boolean;
   updatedAt?: number;
   updatedBy?: string;
 }
@@ -38,6 +40,8 @@ export interface EventItem {
   time?: string; // 'HH:MM' (24시간). 없으면 하루 종일.
   location?: string;
   note?: string;
+  updatedAt?: number;
+  updatedBy?: string;
   links: EventLink[];
 }
 

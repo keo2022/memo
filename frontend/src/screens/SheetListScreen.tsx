@@ -166,7 +166,7 @@ export default function SheetListScreen({ navigation }: Props) {
         visible={!!actionTarget}
         itemName={actionTarget?.name ?? ''}
         itemTypeLabel="시트"
-        deleteWarning={`"${actionTarget?.name ?? ''}" 시트 안의 탭과 표 내용이 모두 사라져요. 되돌릴 수 없어요.`}
+        deleteWarning={`"${actionTarget?.name ?? ''}" 시트가 목록에서 사라져요.`}
         onClose={() => setActionTarget(null)}
         onRename={async (name) => {
           if (!actionTarget) return;

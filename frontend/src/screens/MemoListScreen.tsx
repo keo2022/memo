@@ -173,7 +173,7 @@ export default function MemoListScreen({ navigation }: Props) {
         visible={!!actionTarget}
         itemName={actionTarget?.title ?? ''}
         itemTypeLabel="메모"
-        deleteWarning={`"${actionTarget?.title ?? ''}" 메모와 그 변경 기록이 모두 사라져요. 되돌릴 수 없어요.`}
+        deleteWarning={`"${actionTarget?.title ?? ''}" 메모가 목록에서 사라져요.`}
         onClose={() => setActionTarget(null)}
         onRename={async (name) => {
           if (!actionTarget) return;

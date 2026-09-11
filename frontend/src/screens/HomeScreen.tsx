@@ -13,7 +13,7 @@ import { Ionicons } from '@expo/vector-icons';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { api } from '../db/repository';
+import { api, ConflictError } from '../db/repository';
 import type { EventItem, EventLink, MemoSummary, Sheet } from '../types';
 import { colors, radius, spacing, shadow, fonts, type } from '../theme';
 import EventEditModal, { type EventFormValue } from '../components/EventEditModal';
@@ -121,14 +121,32 @@ export default function HomeScreen() {
 
   const handleSubmit = async (v: EventFormValue) => {
     if (modal?.mode === 'edit') {
-      await api.updateEvent(modal.event.id, {
-        title: v.title,
-        date: v.date,
-        pinned: v.pinned,
-        time: v.time,
-        location: v.location,
-        note: v.note,
-      });
+      try {
+        await api.updateEvent(
+          modal.event.id,
+          {
+            title: v.title,
+            date: v.date,
+            pinned: v.pinned,
+            time: v.time,
+            location: v.location,
+            note: v.note,
+          },
+          modal.event.updatedAt ?? null
+        );
+      } catch (e) {
+        if (e instanceof ConflictError) {
+          // 셀/메모처럼 "누구 걸 남길지" 고르는 대신, 상대가 막 고친 내용을 보여주고 다시 편집하게 합니다
+          // (일정은 필드가 여러 개라 두 버전을 한 화면에서 병합하기보다 최신 내용을 보고 다시 고치는 편이 안전해요).
+          await load();
+          Alert.alert(
+            '방금 상대방이 이 일정을 수정했어요',
+            '최신 내용으로 새로고침했어요. 다시 열어서 확인한 뒤 고쳐주세요.'
+          );
+          return;
+        }
+        throw e;
+      }
     } else {
       await api.createEvent(v);
     }

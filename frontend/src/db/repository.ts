@@ -23,6 +23,7 @@ export interface ConflictCurrent {
   value: string;
   formula?: string;
   computed: number;
+  error?: boolean;
   updatedAt?: number;
   updatedBy?: string;
 }
@@ -220,9 +221,12 @@ export const api = {
       time?: string | null;
       location?: string | null;
       note?: string | null;
-    }
+    },
+    baseUpdatedAt?: number | null
   ): Promise<EventItem> {
-    return request(`/api/events/${id}`, { method: 'PUT', body: JSON.stringify(patch) });
+    const body: Record<string, unknown> = { ...patch };
+    if (baseUpdatedAt !== undefined) body.baseUpdatedAt = baseUpdatedAt;
+    return request(`/api/events/${id}`, { method: 'PUT', body: JSON.stringify(body) });
   },
 
   deleteEvent(id: string): Promise<void> {

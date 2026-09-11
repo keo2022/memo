@@ -115,8 +115,16 @@ export default function EventEditModal({
     }
   };
 
-  const remove = async () => {
+  const remove = () => {
     if (busy || !onDelete) return;
+    Alert.alert('이 일정을 삭제할까요?', `"${title || '이 일정'}"이(가) 사라져요.`, [
+      { text: '취소', style: 'cancel' },
+      { text: '삭제', style: 'destructive', onPress: confirmRemove },
+    ]);
+  };
+
+  const confirmRemove = async () => {
+    if (!onDelete) return;
     setBusy(true);
     try {
       await onDelete();

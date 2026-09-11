@@ -14,6 +14,9 @@ import {
   MemoSummary,
   Memo,
   MemoHistoryEntry,
+  DeletedSheet,
+  DeletedTab,
+  DeletedMemo,
 } from '../types';
 import { shiftFormulaRefs } from '../formula/shiftRefs';
 
@@ -174,6 +177,19 @@ if (!columnExists('events', 'time')) db.exec('ALTER TABLE events ADD COLUMN time
 if (!columnExists('events', 'location')) db.exec('ALTER TABLE events ADD COLUMN location TEXT');
 if (!columnExists('events', 'note')) db.exec('ALTER TABLE events ADD COLUMN note TEXT');
 
+// events에 "누가 언제 고쳤는지"를 나중에 추가했습니다. 동시 편집 충돌 감지에 씁니다(셀/메모와 동일한 baseUpdatedAt 방식).
+if (!columnExists('events', 'updated_at')) db.exec('ALTER TABLE events ADD COLUMN updated_at INTEGER');
+if (!columnExists('events', 'updated_by')) db.exec('ALTER TABLE events ADD COLUMN updated_by TEXT');
+
+// 삭제해도 바로 지우지 않고 "삭제된 시각"만 표시해두는 소프트 삭제용 컬럼.
+// null이면 살아있는 항목, 값이 있으면 지워진 항목(목록에서 숨기되 복원 가능).
+if (!columnExists('sheets', 'deleted_at')) db.exec('ALTER TABLE sheets ADD COLUMN deleted_at INTEGER');
+if (!columnExists('sheets', 'deleted_by')) db.exec('ALTER TABLE sheets ADD COLUMN deleted_by TEXT');
+if (!columnExists('tabs', 'deleted_at')) db.exec('ALTER TABLE tabs ADD COLUMN deleted_at INTEGER');
+if (!columnExists('tabs', 'deleted_by')) db.exec('ALTER TABLE tabs ADD COLUMN deleted_by TEXT');
+if (!columnExists('memos', 'deleted_at')) db.exec('ALTER TABLE memos ADD COLUMN deleted_at INTEGER');
+if (!columnExists('memos', 'deleted_by')) db.exec('ALTER TABLE memos ADD COLUMN deleted_by TEXT');
+
 // tabs에 order_num 컬럼을 나중에 추가했습니다. 기존 탭들은 sheet별로 rowid(생성 순서) 기준으로 순번을 매겨줍니다.
 if (!columnExists('tabs', 'order_num')) {
   db.exec('ALTER TABLE tabs ADD COLUMN order_num INTEGER NOT NULL DEFAULT 0');
@@ -193,6 +209,8 @@ interface SheetRow {
   id: string;
   name: string;
   order_num: number;
+  deleted_at?: number | null;
+  deleted_by?: string | null;
 }
 interface TabRow {
   id: string;
@@ -201,6 +219,8 @@ interface TabRow {
   rows: number;
   cols: number;
   order_num: number;
+  deleted_at?: number | null;
+  deleted_by?: string | null;
 }
 interface CellRow {
   row: number;
@@ -256,6 +276,8 @@ interface EventRow {
   time: string | null;
   location: string | null;
   note: string | null;
+  updated_at: number | null;
+  updated_by: string | null;
 }
 
 const toEvent = (r: EventRow, links: EventLink[]): EventItem => ({
@@ -267,6 +289,8 @@ const toEvent = (r: EventRow, links: EventLink[]): EventItem => ({
   time: r.time ?? undefined,
   location: r.location ?? undefined,
   note: r.note ?? undefined,
+  updatedAt: r.updated_at ?? undefined,
+  updatedBy: r.updated_by ?? undefined,
   links,
 });
 
@@ -322,15 +346,31 @@ function snapshotTab(tabId: string, tab: Tab): TabSnapshot {
 
 export const store = {
   listSheets(): Sheet[] {
-    const rows = db.prepare('SELECT id, name, order_num FROM sheets ORDER BY order_num ASC').all() as unknown as SheetRow[];
+    const rows = db
+      .prepare('SELECT id, name, order_num FROM sheets WHERE deleted_at IS NULL ORDER BY order_num ASC')
+      .all() as unknown as SheetRow[];
     return rows.map(toSheet);
   },
 
+  // 삭제된 시트 목록(최근 삭제 순). 복원 화면(휴지통)에 씁니다.
+  listDeletedSheets(): DeletedSheet[] {
+    const rows = db
+      .prepare(
+        'SELECT id, name, order_num, deleted_at, deleted_by FROM sheets WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC'
+      )
+      .all() as unknown as Required<SheetRow>[];
+    return rows.map((r) => ({ ...toSheet(r), deletedAt: r.deleted_at as number, deletedBy: r.deleted_by ?? undefined }));
+  },
+
   createSheet(name: string): Sheet {
-    const { c } = db.prepare('SELECT COUNT(*) as c FROM sheets').get() as unknown as { c: number };
+    // COUNT(*)로 순번을 매기면 삭제 후 다시 만들 때 다른 항목과 순번이 겹칠 수 있어 MAX+1을 씁니다.
+    const { m } = db.prepare('SELECT COALESCE(MAX(order_num), -1) as m FROM sheets').get() as unknown as {
+      m: number;
+    };
+    const order = m + 1;
     const id = randomUUID();
-    db.prepare('INSERT INTO sheets (id, name, order_num) VALUES (?, ?, ?)').run(id, name, c);
-    return { id, name, order: c };
+    db.prepare('INSERT INTO sheets (id, name, order_num) VALUES (?, ?, ?)').run(id, name, order);
+    return { id, name, order };
   },
 
   reorderSheets(orderedIds: string[]) {
@@ -354,23 +394,53 @@ export const store = {
     return { ...toSheet(existing), name };
   },
 
-  deleteSheet(sheetId: string) {
-    store.listTabs(sheetId).forEach((t) => store.deleteTab(t.id));
-    db.prepare('DELETE FROM sheets WHERE id = ?').run(sheetId);
-    db.prepare("DELETE FROM event_links WHERE kind = 'sheet' AND ref_id = ?").run(sheetId);
+  // 완전히 지우지 않고 삭제 시각만 표시해서 숨깁니다. 안의 탭들도 같은 시각으로 같이 숨기고,
+  // restoreSheet에서 그 시각이 같은 탭들만 골라 같이 되살립니다(시트 삭제보다 먼저 개별 삭제된 탭은 그대로 둠).
+  deleteSheet(sheetId: string, editor: string | undefined) {
+    const now = Date.now();
+    store.listTabs(sheetId).forEach((t) => store.deleteTab(t.id, editor, now));
+    db.prepare('UPDATE sheets SET deleted_at = ?, deleted_by = ? WHERE id = ?').run(now, editor ?? null, sheetId);
+  },
+
+  restoreSheet(sheetId: string): Sheet | undefined {
+    const row = db.prepare('SELECT id, name, order_num, deleted_at FROM sheets WHERE id = ?').get(sheetId) as
+      | unknown as (SheetRow & { deleted_at: number | null })
+      | undefined;
+    if (!row || row.deleted_at == null) return undefined;
+    db.prepare('UPDATE tabs SET deleted_at = NULL, deleted_by = NULL WHERE sheet_id = ? AND deleted_at = ?').run(
+      sheetId,
+      row.deleted_at
+    );
+    db.prepare('UPDATE sheets SET deleted_at = NULL, deleted_by = NULL WHERE id = ?').run(sheetId);
+    return toSheet(row);
   },
 
   listTabs(sheetId: string): Tab[] {
     const rows = db
-      .prepare('SELECT id, sheet_id, name, rows, cols, order_num FROM tabs WHERE sheet_id = ? ORDER BY order_num ASC')
+      .prepare(
+        'SELECT id, sheet_id, name, rows, cols, order_num FROM tabs WHERE sheet_id = ? AND deleted_at IS NULL ORDER BY order_num ASC'
+      )
       .all(sheetId) as unknown as TabRow[];
     return rows.map(toTab);
   },
 
+  // 삭제된 탭 목록(이 시트 안에서 개별 삭제된 것들, 시트 전체 삭제로 같이 숨겨진 건 시트가 복원돼야 보임).
+  listDeletedTabs(sheetId: string): DeletedTab[] {
+    const rows = db
+      .prepare(
+        `SELECT id, sheet_id, name, rows, cols, order_num, deleted_at, deleted_by
+         FROM tabs WHERE sheet_id = ? AND deleted_at IS NOT NULL ORDER BY deleted_at DESC`
+      )
+      .all(sheetId) as unknown as Required<TabRow>[];
+    return rows.map((r) => ({ ...toTab(r), deletedAt: r.deleted_at as number, deletedBy: r.deleted_by ?? undefined }));
+  },
+
   createTab(sheetId: string, name: string, rows = 15, cols = 5): Tab {
-    const { c } = db.prepare('SELECT COUNT(*) as c FROM tabs WHERE sheet_id = ?').get(sheetId) as unknown as {
-      c: number;
-    };
+    // COUNT(*)로 순번을 매기면 삭제 후 다시 만들 때 다른 탭과 순번이 겹칠 수 있어 MAX+1을 씁니다.
+    const { m } = db.prepare('SELECT COALESCE(MAX(order_num), -1) as m FROM tabs WHERE sheet_id = ?').get(
+      sheetId
+    ) as unknown as { m: number };
+    const order = m + 1;
     const id = randomUUID();
     db.prepare('INSERT INTO tabs (id, sheet_id, name, rows, cols, order_num) VALUES (?, ?, ?, ?, ?, ?)').run(
       id,
@@ -378,9 +448,9 @@ export const store = {
       name,
       rows,
       cols,
-      c
+      order
     );
-    return { id, sheetId, name, rows, cols, order: c };
+    return { id, sheetId, name, rows, cols, order };
   },
 
   reorderTabs(sheetId: string, orderedIds: string[]) {
@@ -397,7 +467,7 @@ export const store = {
 
   getTab(tabId: string): Tab | undefined {
     const row = db
-      .prepare('SELECT id, sheet_id, name, rows, cols, order_num FROM tabs WHERE id = ?')
+      .prepare('SELECT id, sheet_id, name, rows, cols, order_num FROM tabs WHERE id = ? AND deleted_at IS NULL')
       .get(tabId) as unknown as TabRow | undefined;
     return row ? toTab(row) : undefined;
   },
@@ -657,13 +727,17 @@ export const store = {
     return { ...existing, name };
   },
 
-  deleteTab(tabId: string) {
-    db.prepare('DELETE FROM cells WHERE tab_id = ?').run(tabId);
-    db.prepare('DELETE FROM column_formats WHERE tab_id = ?').run(tabId);
-    db.prepare('DELETE FROM merges WHERE tab_id = ?').run(tabId);
-    db.prepare('DELETE FROM cell_history WHERE tab_id = ?').run(tabId);
-    db.prepare('DELETE FROM tabs WHERE id = ?').run(tabId);
+  // 완전히 지우지 않고 삭제 시각만 표시해서 숨깁니다. 셀·이력은 그대로 남겨둬서 나중에 복원하면 그대로 돌아옵니다.
+  // deletedAt을 넘기면(시트 전체 삭제로 같이 지워지는 경우) 그 시각을 쓰고, 아니면 지금 시각을 씁니다.
+  deleteTab(tabId: string, editor: string | undefined, deletedAt?: number) {
+    const now = deletedAt ?? Date.now();
+    db.prepare('UPDATE tabs SET deleted_at = ?, deleted_by = ? WHERE id = ?').run(now, editor ?? null, tabId);
     lastDeleteSnapshots.delete(tabId);
+  },
+
+  restoreTab(tabId: string): Tab | undefined {
+    db.prepare('UPDATE tabs SET deleted_at = NULL, deleted_by = NULL WHERE id = ?').run(tabId);
+    return store.getTab(tabId);
   },
 
   getCells(tabId: string): Record<string, CellData> {
@@ -851,7 +925,7 @@ export const store = {
   listEvents(): EventItem[] {
     const rows = db
       .prepare(
-        `SELECT id, title, date, order_num, pinned, time, location, note
+        `SELECT id, title, date, order_num, pinned, time, location, note, updated_at, updated_by
          FROM events ORDER BY pinned DESC, date ASC, time ASC, order_num ASC`
       )
       .all() as unknown as EventRow[];
@@ -872,6 +946,14 @@ export const store = {
     return store.listEvents().find((e) => e.id === id);
   },
 
+  // 그 일정이 마지막으로 수정된 시각(ms). 동시 편집 충돌 감지에 씁니다. 한 번도 안 고쳤으면 null.
+  getEventMeta(id: string): number | null {
+    const r = db.prepare('SELECT updated_at FROM events WHERE id = ?').get(id) as unknown as
+      | { updated_at: number | null }
+      | undefined;
+    return r?.updated_at ?? null;
+  },
+
   createEvent(input: {
     title: string;
     date: string;
@@ -879,12 +961,17 @@ export const store = {
     time?: string | null;
     location?: string | null;
     note?: string | null;
-  }): EventItem {
-    const { c } = db.prepare('SELECT COUNT(*) as c FROM events').get() as unknown as { c: number };
+  }, editor: string | undefined): EventItem {
+    // COUNT(*)로 순번을 매기면 삭제 후 다시 만들 때 다른 일정과 순번이 겹칠 수 있어 MAX+1을 씁니다.
+    const { m } = db.prepare('SELECT COALESCE(MAX(order_num), -1) as m FROM events').get() as unknown as {
+      m: number;
+    };
+    const c = m + 1;
     const id = randomUUID();
+    const now = Date.now();
     db.prepare(
-      `INSERT INTO events (id, title, date, order_num, pinned, time, location, note)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO events (id, title, date, order_num, pinned, time, location, note, updated_at, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       id,
       input.title,
@@ -893,7 +980,9 @@ export const store = {
       input.pinned ? 1 : 0,
       input.time || null,
       input.location || null,
-      input.note || null
+      input.note || null,
+      now,
+      editor ?? null
     );
     return store.getEvent(id)!;
   },
@@ -908,10 +997,13 @@ export const store = {
       time?: string | null;
       location?: string | null;
       note?: string | null;
-    }
+    },
+    editor: string | undefined
   ): EventItem | undefined {
     const existing = db
-      .prepare('SELECT id, title, date, order_num, pinned, time, location, note FROM events WHERE id = ?')
+      .prepare(
+        'SELECT id, title, date, order_num, pinned, time, location, note, updated_at, updated_by FROM events WHERE id = ?'
+      )
       .get(id) as unknown as EventRow | undefined;
     if (!existing) return undefined;
     const title = patch.title ?? existing.title;
@@ -921,8 +1013,8 @@ export const store = {
     const location = patch.location !== undefined ? patch.location || null : existing.location;
     const note = patch.note !== undefined ? patch.note || null : existing.note;
     db.prepare(
-      'UPDATE events SET title = ?, date = ?, pinned = ?, time = ?, location = ?, note = ? WHERE id = ?'
-    ).run(title, date, pinned ? 1 : 0, time, location, note, id);
+      'UPDATE events SET title = ?, date = ?, pinned = ?, time = ?, location = ?, note = ?, updated_at = ?, updated_by = ? WHERE id = ?'
+    ).run(title, date, pinned ? 1 : 0, time, location, note, Date.now(), editor ?? null, id);
     return store.getEvent(id)!;
   },
 
@@ -957,7 +1049,9 @@ export const store = {
   // ── 공유 메모장 ─────────────────────────────────────────
   listMemos(): MemoSummary[] {
     const rows = db
-      .prepare('SELECT id, title, order_num, updated_at, updated_by FROM memos ORDER BY order_num ASC')
+      .prepare(
+        'SELECT id, title, order_num, updated_at, updated_by FROM memos WHERE deleted_at IS NULL ORDER BY order_num ASC'
+      )
       .all() as unknown as {
       id: string;
       title: string;
@@ -974,9 +1068,26 @@ export const store = {
     }));
   },
 
+  // 삭제된 메모 목록(최근 삭제 순). 복원 화면(휴지통)에 씁니다.
+  listDeletedMemos(): DeletedMemo[] {
+    const rows = db
+      .prepare(
+        'SELECT id, title, deleted_at, deleted_by FROM memos WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC'
+      )
+      .all() as unknown as { id: string; title: string; deleted_at: number; deleted_by: string | null }[];
+    return rows.map((r) => ({
+      id: r.id,
+      title: r.title,
+      deletedAt: r.deleted_at,
+      deletedBy: r.deleted_by ?? undefined,
+    }));
+  },
+
   getMemo(id: string): Memo | undefined {
     const r = db
-      .prepare('SELECT id, title, content, order_num, created_at, updated_at, updated_by FROM memos WHERE id = ?')
+      .prepare(
+        'SELECT id, title, content, order_num, created_at, updated_at, updated_by FROM memos WHERE id = ? AND deleted_at IS NULL'
+      )
       .get(id) as unknown as
       | {
           id: string;
@@ -1013,13 +1124,17 @@ export const store = {
   },
 
   createMemo(title: string): Memo {
-    const { c } = db.prepare('SELECT COUNT(*) as c FROM memos').get() as unknown as { c: number };
+    // COUNT(*)로 순번을 매기면 삭제 후 다시 만들 때 다른 메모와 순번이 겹칠 수 있어 MAX+1을 씁니다.
+    const { m } = db.prepare('SELECT COALESCE(MAX(order_num), -1) as m FROM memos').get() as unknown as {
+      m: number;
+    };
+    const order = m + 1;
     const id = randomUUID();
     const now = Date.now();
     db.prepare(
       'INSERT INTO memos (id, title, content, order_num, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
-    ).run(id, title, '', c, now, now);
-    return { id, title, content: '', order: c, createdAt: now, updatedAt: now };
+    ).run(id, title, '', order, now, now);
+    return { id, title, content: '', order, createdAt: now, updatedAt: now };
   },
 
   // 반환값의 updatedAt은 새 수정 시각. 클라이언트가 다음 저장 때 충돌 감지 기준으로 다시 보냅니다.
@@ -1085,15 +1200,19 @@ export const store = {
   },
 
   getMemoMeta(id: string): number | null {
-    const r = db.prepare('SELECT updated_at FROM memos WHERE id = ?').get(id) as unknown as
+    const r = db.prepare('SELECT updated_at FROM memos WHERE id = ? AND deleted_at IS NULL').get(id) as unknown as
       | { updated_at: number | null }
       | undefined;
     return r?.updated_at ?? null;
   },
 
-  deleteMemo(id: string) {
-    db.prepare('DELETE FROM memos WHERE id = ?').run(id);
-    db.prepare('DELETE FROM memo_history WHERE memo_id = ?').run(id);
-    db.prepare("DELETE FROM event_links WHERE kind = 'memo' AND ref_id = ?").run(id);
+  // 완전히 지우지 않고 삭제 시각만 표시해서 숨깁니다. 본문·이력은 그대로 남겨둬서 복원하면 그대로 돌아옵니다.
+  deleteMemo(id: string, editor: string | undefined) {
+    db.prepare('UPDATE memos SET deleted_at = ?, deleted_by = ? WHERE id = ?').run(Date.now(), editor ?? null, id);
+  },
+
+  restoreMemo(id: string): Memo | undefined {
+    db.prepare('UPDATE memos SET deleted_at = NULL, deleted_by = NULL WHERE id = ?').run(id);
+    return store.getMemo(id);
   },
 };

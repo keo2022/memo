@@ -45,6 +45,15 @@ export default function MemoDetailScreen({ route, navigation }: Props) {
   const dirtyRef = useRef(false);
   dirtyRef.current = dirty || saving || conflict !== null;
 
+  // 화면을 벗어날 때(뒤로가기) 자동저장이 충돌로 실패하면, 그 시점엔 이미 화면이 사라져서
+  // 화면 안의 충돌 모달(setConflict)을 띄워도 아무도 못 봅니다 — 이땐 Alert로 대신 알려줍니다.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const applyMemo = useCallback((m: Memo, keepDraft: boolean) => {
     setMemo(m);
     setSavedContent(m.content);
@@ -94,7 +103,16 @@ export default function MemoDetailScreen({ route, navigation }: Props) {
       setBaseUpdatedAt(updated.updatedAt ?? null);
     } catch (e) {
       if (e instanceof ConflictError) {
-        setConflict(e.current as MemoConflictCurrent);
+        if (mountedRef.current) {
+          setConflict(e.current as MemoConflictCurrent);
+        } else {
+          // 화면을 이미 나간 뒤라 충돌 모달을 못 띄움 — 방금 쓴 내용이 저장되지 않았다는 걸 놓치지 않게 알립니다.
+          const other = (e.current as MemoConflictCurrent | null)?.updatedBy;
+          Alert.alert(
+            '방금 수정한 메모가 저장되지 않았어요',
+            `${other ? `${other}님이` : '상대방이'} 먼저 저장해서 충돌났어요. 메모를 다시 열어 내용을 확인해주세요.`
+          );
+        }
       } else {
         Alert.alert('저장 실패', friendlyMessage(e));
       }

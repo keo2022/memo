@@ -13,6 +13,24 @@ export interface Tab {
   order: number;
 }
 
+// 삭제됐지만 아직 완전히 지워지지 않아 복원 가능한 항목(휴지통 목록용).
+export interface DeletedSheet extends Sheet {
+  deletedAt: number;
+  deletedBy?: string;
+}
+
+export interface DeletedTab extends Tab {
+  deletedAt: number;
+  deletedBy?: string;
+}
+
+export interface DeletedMemo {
+  id: string;
+  title: string;
+  deletedAt: number;
+  deletedBy?: string;
+}
+
 export interface CellData {
   value: string;
   formula?: string;
@@ -45,6 +63,8 @@ export interface EventItem {
   time?: string; // 'HH:MM' (24시간). 없으면 하루 종일.
   location?: string;
   note?: string;
+  updatedAt?: number;
+  updatedBy?: string;
   links: EventLink[];
 }
 

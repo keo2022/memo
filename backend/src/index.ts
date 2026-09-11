@@ -6,6 +6,17 @@ import { CellData, ColumnFormat, Merge, EventLink } from './types';
 
 const COLUMN_FORMATS: ColumnFormat[] = ['text', 'checkbox', 'number'];
 
+// 저장하기 전에 수식 문법만 미리 검사합니다(참조 셀 값은 전부 0으로 가정 — 실제 계산이 아니라 파싱이 되는지만 확인).
+// 여기서 걸러야 잘못된 수식이 DB에 들어가지 않고, 그래야 이 탭을 열 때마다 계산이 실패하는 상황을 막습니다.
+function isValidFormula(formula: string): boolean {
+  try {
+    evaluateFormula(formula, () => 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function mergesOverlap(a: Merge, b: Merge): boolean {
   return (
     a.anchorRow < b.anchorRow + b.rowSpan &&
@@ -41,12 +52,15 @@ function getEditor(req: express.Request): string | undefined {
 }
 
 // stack: 지금 계산 중인 셀들. 순환 참조(A1=B1, B1=A1)면 무한 재귀로 서버가 죽으므로 0으로 끊습니다.
+// errors: 수식 오류(잘못된 문법 등)나 0으로 나누기처럼 숫자가 아닌 결과(Infinity/NaN)가 나온 셀의 "row_col" 키 모음.
+// 여기 걸린 셀은 계산상 0으로 취급해 전체가 죽지 않게 하고, 호출한 쪽에서 그 셀만 오류로 표시합니다.
 function computeCell(
   tabId: string,
   row: number,
   col: number,
   cache: Map<string, number>,
-  stack: Set<string> = new Set()
+  stack: Set<string> = new Set(),
+  errors?: Set<string>
 ): number {
   const key = `${row}_${col}`;
   if (cache.has(key)) return cache.get(key)!;
@@ -58,8 +72,18 @@ function computeCell(
 
   if (cell.formula) {
     stack.add(key);
-    const value = evaluateFormula(cell.formula, (r, c) => computeCell(tabId, r, c, cache, stack));
+    let value: number;
+    try {
+      value = evaluateFormula(cell.formula, (r, c) => computeCell(tabId, r, c, cache, stack, errors));
+    } catch {
+      value = 0;
+      errors?.add(key);
+    }
     stack.delete(key);
+    if (!Number.isFinite(value)) {
+      value = 0;
+      errors?.add(key);
+    }
     cache.set(key, value);
     return value;
   }
@@ -104,12 +128,27 @@ app.put('/api/sheets/:sheetId', (req, res) => {
 });
 
 app.delete('/api/sheets/:sheetId', (req, res) => {
-  store.deleteSheet(req.params.sheetId);
+  store.deleteSheet(req.params.sheetId, getEditor(req));
   res.status(204).end();
+});
+
+// :sheetId 라우트보다 먼저 등록해야 "trash"가 :sheetId로 매칭되지 않습니다.
+app.get('/api/sheets/trash', (_req, res) => {
+  res.json(store.listDeletedSheets());
+});
+
+app.post('/api/sheets/:sheetId/restore', (req, res) => {
+  const sheet = store.restoreSheet(req.params.sheetId);
+  if (!sheet) return res.status(404).json({ error: 'deleted sheet not found' });
+  res.json(sheet);
 });
 
 app.get('/api/sheets/:sheetId/tabs', (req, res) => {
   res.json(store.listTabs(req.params.sheetId));
+});
+
+app.get('/api/sheets/:sheetId/tabs/trash', (req, res) => {
+  res.json(store.listDeletedTabs(req.params.sheetId));
 });
 
 app.post('/api/sheets/:sheetId/tabs', (req, res) => {
@@ -193,12 +232,14 @@ app.get('/api/tabs/:tabId', (req, res) => {
 
   const cells = store.getCells(tab.id);
   const cache = new Map<string, number>();
+  const errors = new Set<string>();
   const grid: {
     row: number;
     col: number;
     value: string;
     formula?: string;
     computed: number;
+    error?: boolean;
     updatedAt?: number;
     updatedBy?: string;
   }[] = [];
@@ -212,7 +253,8 @@ app.get('/api/tabs/:tabId', (req, res) => {
         col: c,
         value: cell?.value ?? '',
         formula: cell?.formula,
-        computed: computeCell(tab.id, r, c, cache),
+        computed: computeCell(tab.id, r, c, cache, undefined, errors),
+        error: errors.has(key) || undefined,
         updatedAt: cell?.updatedAt,
         updatedBy: cell?.updatedBy,
       });
@@ -246,8 +288,14 @@ app.put('/api/tabs/:tabId', (req, res) => {
 });
 
 app.delete('/api/tabs/:tabId', (req, res) => {
-  store.deleteTab(req.params.tabId);
+  store.deleteTab(req.params.tabId, getEditor(req));
   res.status(204).end();
+});
+
+app.post('/api/tabs/:tabId/restore', (req, res) => {
+  const tab = store.restoreTab(req.params.tabId);
+  if (!tab) return res.status(404).json({ error: 'tab not found' });
+  res.json(tab);
 });
 
 app.put('/api/tabs/:tabId/columns/:col/format', (req, res) => {
@@ -358,12 +406,19 @@ app.put('/api/tabs/:tabId/cells', (req, res) => {
     return res.status(400).json({ error: `row must be 0..${tab.rows - 1}, col must be 0..${tab.cols - 1}` });
   }
 
+  // 수식 문법이 잘못되면(괄호 안 닫힘, 모르는 함수 등) 여기서 막습니다. 이걸 안 막고 저장부터 하면,
+  // 이 탭을 불러올 때마다(GET) 매번 계산이 실패해서 탭 전체가 영영 안 열리는 상태가 될 수 있습니다.
+  if (formula && !isValidFormula(formula)) {
+    return res.status(400).json({ error: '수식이 올바르지 않아요' });
+  }
+
   // 동시 편집 충돌: 클라이언트가 불러온 뒤(baseUpdatedAt) 다른 사람이 이 셀을 먼저 고쳤으면 거절합니다.
   const hasBase = Object.prototype.hasOwnProperty.call(req.body, 'baseUpdatedAt');
   const currentMeta = store.getCellMeta(tab.id, row, col);
   if (hasBase && currentMeta != null && (baseUpdatedAt == null || currentMeta > baseUpdatedAt)) {
     const current = store.getCells(tab.id)[`${row}_${col}`];
-    const computed = computeCell(tab.id, row, col, new Map());
+    const conflictErrors = new Set<string>();
+    const computed = computeCell(tab.id, row, col, new Map(), undefined, conflictErrors);
     return res.status(409).json({
       error: 'conflict',
       current: {
@@ -372,6 +427,7 @@ app.put('/api/tabs/:tabId/cells', (req, res) => {
         value: current?.value ?? '',
         formula: current?.formula,
         computed,
+        error: conflictErrors.size > 0 || undefined,
         updatedAt: currentMeta,
         updatedBy: current?.updatedBy,
       },
@@ -381,8 +437,9 @@ app.put('/api/tabs/:tabId/cells', (req, res) => {
   const data: CellData = { value: value ?? '', formula };
   const updatedAt = store.recordAndSetCell(tab.id, row, col, data, getEditor(req));
 
-  const computed = computeCell(tab.id, row, col, new Map());
-  res.json({ row, col, ...data, computed, updatedAt, updatedBy: getEditor(req) });
+  const saveErrors = new Set<string>();
+  const computed = computeCell(tab.id, row, col, new Map(), undefined, saveErrors);
+  res.json({ row, col, ...data, computed, error: saveErrors.size > 0 || undefined, updatedAt, updatedBy: getEditor(req) });
 });
 
 app.get('/api/tabs/:tabId/history', (req, res) => {
@@ -406,8 +463,9 @@ app.post('/api/tabs/:tabId/history/:id/revert', (req, res) => {
     return res.status(409).json({ error: 'stale', message: '그 사이 다른 수정이 있어 되돌릴 수 없어요' });
   }
 
-  const computed = computeCell(tab.id, result.row, result.col, new Map());
-  res.json({ ...result, computed });
+  const revertErrors = new Set<string>();
+  const computed = computeCell(tab.id, result.row, result.col, new Map(), undefined, revertErrors);
+  res.json({ ...result, computed, error: revertErrors.size > 0 || undefined });
 });
 
 // ── 메인화면: 기념일 / D-day ──────────────────────────────
@@ -447,24 +505,28 @@ app.post('/api/events', (req, res) => {
   const note = optionalText(body, 'note', NOTE_MAX);
   if (location === null || note === null) return res.status(400).json({ error: 'location/note must be strings' });
   res.status(201).json(
-    store.createEvent({
-      title: title.trim(),
-      date,
-      pinned: pinned === true,
-      time: typeof time === 'string' ? time : null,
-      location,
-      note,
-    })
+    store.createEvent(
+      {
+        title: title.trim(),
+        date,
+        pinned: pinned === true,
+        time: typeof time === 'string' ? time : null,
+        location,
+        note,
+      },
+      getEditor(req)
+    )
   );
 });
 
 app.put('/api/events/:id', (req, res) => {
   const body = req.body as Record<string, unknown>;
-  const { title, date, pinned, time } = body as {
+  const { title, date, pinned, time, baseUpdatedAt } = body as {
     title?: string;
     date?: string;
     pinned?: unknown;
     time?: unknown;
+    baseUpdatedAt?: number | null;
   };
   if (title !== undefined && !title.trim()) return res.status(400).json({ error: 'title cannot be empty' });
   if (date !== undefined && !DATE_RE.test(date)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
@@ -477,14 +539,27 @@ app.put('/api/events/:id', (req, res) => {
   const note = optionalText(body, 'note', NOTE_MAX);
   if (location === null || note === null) return res.status(400).json({ error: 'location/note must be strings' });
 
-  const updated = store.updateEvent(req.params.id, {
-    title: title?.trim(),
-    date,
-    pinned: pinned as boolean | undefined,
-    time: hasTime ? (typeof time === 'string' ? time : null) : undefined,
-    location,
-    note,
-  });
+  // 동시 편집 충돌: 둘이 동시에 같은 일정을 고칠 때, 내가 불러온 뒤 상대가 먼저 저장했으면 거절합니다.
+  const hasBase = Object.prototype.hasOwnProperty.call(req.body, 'baseUpdatedAt');
+  const currentMeta = store.getEventMeta(req.params.id);
+  if (hasBase && currentMeta != null && (baseUpdatedAt == null || currentMeta > baseUpdatedAt)) {
+    const current = store.getEvent(req.params.id);
+    if (!current) return res.status(404).json({ error: 'event not found' });
+    return res.status(409).json({ error: 'conflict', current });
+  }
+
+  const updated = store.updateEvent(
+    req.params.id,
+    {
+      title: title?.trim(),
+      date,
+      pinned: pinned as boolean | undefined,
+      time: hasTime ? (typeof time === 'string' ? time : null) : undefined,
+      location,
+      note,
+    },
+    getEditor(req)
+  );
   if (!updated) return res.status(404).json({ error: 'event not found' });
   res.json(updated);
 });
@@ -526,7 +601,7 @@ app.post('/api/memos', (req, res) => {
   res.status(201).json(store.createMemo(title.trim()));
 });
 
-// :id 라우트보다 먼저 등록해야 "reorder"가 :id로 매칭되지 않습니다.
+// :id 라우트보다 먼저 등록해야 "reorder"/"trash"가 :id로 매칭되지 않습니다.
 app.put('/api/memos/reorder', (req, res) => {
   const { orderedIds } = req.body as { orderedIds?: string[] };
   if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
@@ -534,6 +609,10 @@ app.put('/api/memos/reorder', (req, res) => {
   }
   store.reorderMemos(orderedIds);
   res.json(store.listMemos());
+});
+
+app.get('/api/memos/trash', (_req, res) => {
+  res.json(store.listDeletedMemos());
 });
 
 app.get('/api/memos/:id', (req, res) => {
@@ -581,8 +660,14 @@ app.put('/api/memos/:id', (req, res) => {
 });
 
 app.delete('/api/memos/:id', (req, res) => {
-  store.deleteMemo(req.params.id);
+  store.deleteMemo(req.params.id, getEditor(req));
   res.status(204).end();
+});
+
+app.post('/api/memos/:id/restore', (req, res) => {
+  const memo = store.restoreMemo(req.params.id);
+  if (!memo) return res.status(404).json({ error: 'deleted memo not found' });
+  res.json(memo);
 });
 
 // 메모 본문 변경 이력 (되돌리기용)

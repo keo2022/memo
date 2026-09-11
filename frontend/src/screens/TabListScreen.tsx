@@ -172,7 +172,7 @@ export default function TabListScreen({ route, navigation }: Props) {
         visible={!!actionTarget}
         itemName={actionTarget?.name ?? ''}
         itemTypeLabel="탭"
-        deleteWarning={`"${actionTarget?.name ?? ''}" 탭의 표 내용이 모두 사라져요. 되돌릴 수 없어요.`}
+        deleteWarning={`"${actionTarget?.name ?? ''}" 탭이 목록에서 사라져요.`}
         onClose={() => setActionTarget(null)}
         onRename={async (name) => {
           if (!actionTarget) return;
